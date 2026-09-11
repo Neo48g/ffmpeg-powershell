@@ -1,4 +1,5 @@
 ﻿#Requires -Version 5.1
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Host.UI.RawUI.WindowTitle = "FFmpeg Tools Hub"
 $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
@@ -35,10 +36,17 @@ function Update-LocalPath {
 }
 Update-LocalPath
 
-function Test-Command { param([string]$Cmd) try { $null = Get-Command $Cmd -ErrorAction Stop; return $true } catch { return $false } }
-function Get-ToolVersion {
-    param([string]$Cmd, [string]$Arg)
-    try { $out = & $Cmd $Arg 2>&1 | Select-Object -First 1; return $out } catch { return "N/A" }
+function Get-ToolPath {
+    param([string]$ToolName)
+    $localPath = Join-Path $ToolsDir "$ToolName.exe"
+    if (Test-Path $localPath) { return $localPath }
+
+    try {
+        $cmd = Get-Command $ToolName -ErrorAction Stop
+        return $cmd.Source
+    } catch {
+        return $null
+    }
 }
 
 # --- FFmpeg Detailed Info ---
@@ -53,8 +61,7 @@ function Show-FFmpegInfo {
     Write-Host "`n  $(L 'KEY LIBRARIES & CODECS' 'КЛЮЧЕВЫЕ БИБЛИОТЕКИ И КОДЕКИ')" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
     
-    $encodersOutput = ""
-    $filtersOutput = ""
+    $encodersOutput = ""; $filtersOutput = ""
     try { $encodersOutput = & ffmpeg -encoders 2>$null } catch {}
     try { $filtersOutput = & ffmpeg -filters 2>$null } catch {}
     
@@ -98,77 +105,119 @@ function Show-DependenciesMenu {
     do {
         Show-Banner (L "DEPENDENCIES MANAGEMENT" "УПРАВЛЕНИЕ ЗАВИСИМОСТЯМИ")
         
-        # Status Check
-        $ffmpegStatus = if (Test-Command "ffmpeg") { "[OK] $(Get-ToolVersion ffmpeg -version)" } else { "[X] $(L 'Not found' 'Не найден')" }
-        $ffmpegColor = if (Test-Command "ffmpeg") { "Green" } else { "Red" }
+        $ffmpegExe = Get-ToolPath "ffmpeg"
+        $ytdlpExe = Get-ToolPath "yt-dlp"
+        $nodeExe = Get-ToolPath "node"
+
+        $ffmpegStatus = if ($ffmpegExe) { "[OK] $(& $ffmpegExe -version 2>&1 | Select-Object -First 1)" } else { "[X] $(L 'Not found' 'Не найден')" }
+        $ffmpegColor = if ($ffmpegExe) { "Green" } else { "Red" }
         
-        $ytdlpStatus = if (Test-Command "yt-dlp") { "[OK] $(Get-ToolVersion yt-dlp --version)" } else { "[X] $(L 'Not found' 'Не найден')" }
-        $ytdlpColor = if (Test-Command "yt-dlp") { "Green" } else { "Red" }
+        $ytdlpStatus = if ($ytdlpExe) { "[OK] $(& $ytdlpExe --version 2>&1 | Select-Object -First 1)" } else { "[X] $(L 'Not found' 'Не найден')" }
+        $ytdlpColor = if ($ytdlpExe) { "Green" } else { "Red" }
         
-        $nodeStatus = if (Test-Command "node") { "[OK] $(Get-ToolVersion node -v)" } else { "[X] $(L 'Not found' 'Не найден')" }
-        $nodeColor = if (Test-Command "node") { "Green" } else { "Red" }
+        $nodeStatus = if ($nodeExe) { "[OK] $(& $nodeExe -v 2>&1 | Select-Object -First 1)" } else { "[X] $(L 'Not found' 'Не найден')" }
+        $nodeColor = if ($nodeExe) { "Green" } else { "Red" }
 
         Write-Host "  $(L 'STATUS' 'СТАТУС')" -ForegroundColor Yellow
         Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
         Write-Host "  FFmpeg (Full GPL): " -NoNewline -ForegroundColor White; Write-Host $ffmpegStatus -ForegroundColor $ffmpegColor
         Write-Host "  yt-dlp:            " -NoNewline -ForegroundColor White; Write-Host $ytdlpStatus -ForegroundColor $ytdlpColor
-        Write-Host "  Node.js:           " -NoNewline -ForegroundColor White; Write-Host $nodeStatus -ForegroundColor $nodeColor
+        Write-Host "  Node.js (LTS):     " -NoNewline -ForegroundColor White; Write-Host $nodeStatus -ForegroundColor $nodeColor
         
         Write-Host "`n  $(L 'ACTIONS' 'ДЕЙСТВИЯ')" -ForegroundColor Yellow
         Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
         Write-Host "  [1] $(L 'Install/Update FFmpeg (Full Build)' 'Установить/Обновить FFmpeg (Full Build)')" -ForegroundColor White
         Write-Host "  [2] $(L 'Install/Update yt-dlp' 'Установить/Обновить yt-dlp')" -ForegroundColor White
-        Write-Host "  [3] $(L 'Open Node.js Download Page' 'Открыть страницу загрузки Node.js')" -ForegroundColor White
+        Write-Host "  [3] $(L 'Install/Update Node.js (LTS)' 'Установить/Обновить Node.js (LTS)')" -ForegroundColor White
         Write-Host "  [4] $(L 'View FFmpeg Detailed Info' 'Посмотреть детальную информацию FFmpeg')" -ForegroundColor Cyan
         Write-Host "`n  [0] $(L 'Back to Hub' 'Вернуться в Хаб')" -ForegroundColor Red
         
-        $choice = Read-Host (L "  Select action" "  Выберите действие")
-        
-        switch ($choice) {
-            '1' {
-                $url = "https://github.com/BtbN/ffmpeg-builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-                $zipPath = Join-Path $env:TEMP "ffmpeg_full.zip"
-                $tempDir = Join-Path $env:TEMP "ffmpeg_extract"
-                $destBin = Join-Path $ToolsDir "ffmpeg\bin"
-                
-                Write-Host "`n  $(L 'Downloading FFmpeg Full GPL (with VMAF, NVENC, etc.)...' 'Скачивание FFmpeg Full GPL (с VMAF, NVENC и т.д.)...')" -ForegroundColor Cyan
-                try {
-                    $wc = New-Object System.Net.WebClient
-                    $wc.DownloadFile($url, $zipPath)
-                    Write-Host "  $(L 'Extracting...' 'Извлечение...')" -ForegroundColor Cyan
-                    if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
-                    Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force
-                    $binFolder = Get-ChildItem -Path $tempDir -Recurse -Directory -Filter "bin" | Select-Object -First 1
-                    if (Test-Path $destBin) { Remove-Item $destBin -Recurse -Force }
-                    Move-Item -Path $binFolder.FullName -Destination $destBin -Force
-                    Remove-Item $zipPath -Force; Remove-Item $tempDir -Recurse -Force
-                    Update-LocalPath
-                    Write-Host "  [OK] $(L 'FFmpeg installed successfully!' 'FFmpeg успешно установлен!')" -ForegroundColor Green
-                } catch { Write-Host "  [X] $(L 'Error' 'Ошибка'): $_" -ForegroundColor Red }
-                Read-Host (L "  Press Enter to continue" "  Нажмите Enter для продолжения")
-            }
-            '2' {
-                $url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-                $destPath = Join-Path $ToolsDir "yt-dlp.exe"
-                Write-Host "`n  $(L 'Downloading yt-dlp...' 'Скачивание yt-dlp...')" -ForegroundColor Cyan
-                try {
-                    $wc = New-Object System.Net.WebClient
-                    $wc.DownloadFile($url, $destPath)
-                    Update-LocalPath
-                    Write-Host "  [OK] $(L 'yt-dlp installed successfully!' 'yt-dlp успешно установлен!')" -ForegroundColor Green
-                } catch { Write-Host "  [X] $(L 'Error' 'Ошибка'): $_" -ForegroundColor Red }
-                Read-Host (L "  Press Enter to continue" "  Нажмите Enter для продолжения")
-            }
-            '3' {
-                Write-Host "`n  $(L 'Opening official Node.js download page...' 'Открытие официальной страницы загрузки Node.js...')" -ForegroundColor Cyan
-                Start-Process "https://nodejs.org/en/download"
-                Write-Host "  $(L 'Download the Windows Installer (.msi) and run it.' 'Скачайте Windows Installer (.msi) и запустите его.')" -ForegroundColor Yellow
-                Read-Host (L "  Press Enter to continue" "  Нажмите Enter для продолжения")
-            }
-            '4' { Show-FFmpegInfo }
-            '0' { return }
-            default { Write-Host "`n  [!] $(L 'Invalid choice' 'Неверный выбор')" -ForegroundColor Red; Start-Sleep 1 }
-        }
+             $choice = Read-Host (L "  Select action" "  Выберите действие")
+     switch ($choice) {
+         '1' {
+             $url = "https://github.com/BtbN/ffmpeg-builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+             $zipPath = Join-Path $env:TEMP "ffmpeg_full.zip"
+             $tempDir = Join-Path $env:TEMP "ffmpeg_extract"
+             $destParent = Join-Path $ToolsDir "ffmpeg"
+             $destBin = Join-Path $destParent "bin"
+             Write-Host "`n  $(L 'Downloading FFmpeg Full GPL (with VMAF, NVENC, etc.)...' 'Скачивание FFmpeg Full GPL (с VMAF, NVENC и т.д.)...')" -ForegroundColor Cyan
+             try {
+                 if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
+                 if (Test-Path $destParent) { Remove-Item $destParent -Recurse -Force -ErrorAction SilentlyContinue }
+                 $wc = New-Object System.Net.WebClient
+                 $wc.DownloadFile($url, $zipPath)
+                 Write-Host "  $(L 'Extracting...' 'Извлечение...')" -ForegroundColor Cyan
+                 Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force
+                 $binFolder = Get-ChildItem -Path $tempDir -Recurse -Directory -Filter "bin" | Select-Object -First 1
+                 if ($binFolder) {
+                     New-Item -ItemType Directory -Path $destParent -Force | Out-Null
+                     Move-Item -Path $binFolder.FullName -Destination $destBin -Force
+                     Write-Host "  [OK] $(L 'FFmpeg installed successfully!' 'FFmpeg успешно установлен!')" -ForegroundColor Green
+                 } else {
+                     Write-Host "  [X] $(L 'Error: bin folder not found in archive' 'Ошибка: папка bin не найдена в архиве')" -ForegroundColor Red
+                 }
+                 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+                 Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+                 Update-LocalPath
+             } catch { 
+                 Write-Host "  [X] $(L 'Error' 'Ошибка'): $_" -ForegroundColor Red 
+             }
+             Read-Host (L "  Press Enter to continue" "  Нажмите Enter для продолжения")
+         }
+         '2' {
+             $url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+             $destPath = Join-Path $ToolsDir "yt-dlp.exe"
+             Write-Host "`n  $(L 'Downloading yt-dlp...' 'Скачивание yt-dlp...')" -ForegroundColor Cyan
+             try {
+                 if (Test-Path $destPath) { Remove-Item $destPath -Force }
+                 Invoke-WebRequest -Uri $url -OutFile $destPath -UseBasicParsing
+                 $fileSize = (Get-Item $destPath).Length
+                 if ($fileSize -lt 1000000) {
+                     Remove-Item $destPath -Force
+                     throw (L "Downloaded file is corrupted (HTML page?)." "Скачанный файл поврежден (HTML страница?).")
+                 }
+                 Update-LocalPath
+                 Write-Host "  [OK] $(L 'yt-dlp installed successfully!' 'yt-dlp успешно установлен!')" -ForegroundColor Green
+             } catch { Write-Host "  [X] $(L 'Error' 'Ошибка'): $_" -ForegroundColor Red }
+             Read-Host (L "  Press Enter to continue" "  Нажмите Enter для продолжения")
+         }
+         '3' {
+             $nodeVersion = "v22.11.0"
+             $url = "https://nodejs.org/dist/$nodeVersion/node-$nodeVersion-win-x64.zip"
+             $zipPath = Join-Path $env:TEMP "node_lts.zip"
+             $tempDir = Join-Path $env:TEMP "node_extract"
+             $destParent = Join-Path $ToolsDir "node"
+             Write-Host "`n  $(L 'Downloading Node.js LTS...' 'Скачивание Node.js LTS...')" -ForegroundColor Cyan
+             try {
+                 if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
+                 if (Test-Path $destParent) { Remove-Item $destParent -Recurse -Force -ErrorAction SilentlyContinue }
+                 $wc = New-Object System.Net.WebClient
+                 $wc.DownloadFile($url, $zipPath)
+                 Write-Host "  $(L 'Extracting...' 'Извлечение...')" -ForegroundColor Cyan
+                 Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force
+                 $extractedFolder = Get-ChildItem -Path $tempDir -Directory | Select-Object -First 1
+                 if ($extractedFolder) {
+                     Move-Item -Path $extractedFolder.FullName -Destination $destParent -Force
+                     Write-Host "  [OK] $(L 'Node.js installed successfully!' 'Node.js успешно установлен!')" -ForegroundColor Green
+                 } else {
+                     Write-Host "  [X] $(L 'Error: Node folder not found in archive' 'Ошибка: Папка Node не найдена в архиве')" -ForegroundColor Red
+                 }
+                 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+                 Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+                 Update-LocalPath
+             } catch { 
+                 Write-Host "  [X] $(L 'Error' 'Ошибка'): $_" -ForegroundColor Red 
+             }
+             Read-Host (L "  Press Enter to continue" "  Нажмите Enter для продолжения")
+         }
+         '4' { Show-FFmpegInfo }
+         
+         # ИСПРАВЛЕНИЕ: return вместо break. 
+         # return мгновенно завершает функцию Show-DependenciesMenu и возвращает управление в главный цикл Хаба.
+         '0' { return } 
+         
+         default { Write-Host "`n  [!] $(L 'Invalid choice' 'Неверный выбор')" -ForegroundColor Red; Start-Sleep 1 }
+     }
     } while ($true)
 }
 
