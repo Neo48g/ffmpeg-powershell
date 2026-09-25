@@ -1,12 +1,10 @@
 @echo off
-title Video Compressor
+chcp 866 >nul
+title YT-DLP Downloader
 cd /d "%~dp0"
 
-:: Родительская папка
-for %%I in (..) do set "VIDEO_FOLDER=%%~fI"
-
-:: Запускаем PowerShell скрипт с передачей пути к папке с видео
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\yt-dlp-menu.ps1" -VideoFolder "%VIDEO_FOLDER%"
+:: Запускает меню скачивания yt-dlp
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\yt-dlp-menu.ps1"
 
 echo.
 echo -------------------------------------------------------------------
