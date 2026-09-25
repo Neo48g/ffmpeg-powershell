@@ -1,8 +1,7 @@
 #Requires -Version 5.1
 $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
-$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{Language="EN"; EnableLogs=$true; LogsFolder=(Join-Path $ScriptDir "logs")} }
-function L($en, $ru) { if ($global:Cfg.Language -eq 'RU') { return $ru } return $en }
+$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$true; LogsFolder=(Join-Path $ScriptDir "logs")} }
 
 function Show-Banner {
     param([string]$Title)
@@ -41,11 +40,11 @@ function Resolve-InputPath {
     }
     if ($candidates.Count -eq 1) { return $candidates[0] }
     elseif ($candidates.Count -gt 1) {
-        Write-Host (L "  Multiple files found. Select:" "  Найдено несколько файлов. Выберите:") -ForegroundColor White
+        Write-Host ("  Multiple files found. Select:") -ForegroundColor White
         for ($i = 0; $i -lt $candidates.Count; $i++) {
             Write-Host "    [$($i + 1)] $([System.IO.Path]::GetFileName($candidates[$i]))" -ForegroundColor White
         }
-        $choice = Read-Host (L "  Number" "  Номер")
+        $choice = Read-Host "  Number"
         if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $candidates.Count) {
             return $candidates[[int]$choice - 1]
         }
@@ -66,7 +65,7 @@ function Get-FileType {
 }
 
 function Show-VideoFormats {
-    Show-Banner (L "VIDEO FORMATS" "ФОРМАТЫ ВИДЕО")
+    Show-Banner "VIDEO FORMATS"
     Write-Host "  [1]  MP4  (H.264 + AAC)" -ForegroundColor White
     Write-Host "  [2]  MKV  (H.264 + AAC)" -ForegroundColor White
     Write-Host "  [3]  AVI  (MPEG-4 + MP3)" -ForegroundColor White
@@ -83,27 +82,27 @@ function Show-VideoFormats {
     Write-Host "  [14] DV   (DV Video + PCM)" -ForegroundColor White
     Write-Host "  [15] MXF  (MPEG-2 + PCM)" -ForegroundColor White
     Write-Host "  [16] AMV  (MJPEG + ADPCM)" -ForegroundColor White
-    Write-Host "  [0]  $(L 'Back' 'Назад')" -ForegroundColor Red
-    return Read-Host (L "  Select format" "  Выберите формат")
+    Write-Host "  [0]  $('Back')" -ForegroundColor Red
+    return Read-Host "  Select format"
 }
 
 function Show-ImageFormats {
-    Show-Banner (L "IMAGE FORMATS" "ФОРМАТЫ ИЗОБРАЖЕНИЙ")
+    Show-Banner "IMAGE FORMATS"
     Write-Host "  [1]  PNG   [2]  JPG   [3]  JFIF  [4]  WebP" -ForegroundColor White
     Write-Host "  [5]  BMP   [6]  TIFF  [7]  GIF   [8]  ICO" -ForegroundColor White
     Write-Host "  [9]  TGA   [10] PCX   [11] PPM   [12] PGM" -ForegroundColor White
     Write-Host "  [13] PBM   [14] XPM   [15] XBM   [16] JP2" -ForegroundColor White
     Write-Host "  [17] HDR   [18] EXR   [19] DDS   [20] SUN" -ForegroundColor White
     Write-Host "  [21] SGI   [22] PICT  [23] VIFF  [24] XWD" -ForegroundColor White
-    Write-Host "  [0]  $(L 'Back' 'Назад')" -ForegroundColor Red
-    return Read-Host (L "  Select format" "  Выберите формат")
+    Write-Host "  [0]  $('Back')" -ForegroundColor Red
+    return Read-Host "  Select format"
 }
 
 function Show-AudioFormats {
-    Show-Banner (L "AUDIO FORMATS" "ФОРМАТЫ АУДИО")
+    Show-Banner "AUDIO FORMATS"
     Write-Host "  [1] MP3  [2] WAV  [3] FLAC  [4] AAC  [5] OGG" -ForegroundColor White
-    Write-Host "  [0] $(L 'Back' 'Назад')" -ForegroundColor Red
-    return Read-Host (L "  Select format" "  Выберите формат")
+    Write-Host "  [0] $('Back')" -ForegroundColor Red
+    return Read-Host "  Select format"
 }
 
 function Get-FormatArgs {
@@ -170,24 +169,24 @@ function Get-FormatArgs {
 
 # Main Loop
 do {
-    Show-Banner (L "MEDIA CONVERTER" "КОНВЕРТЕР МЕДИА")
-    Write-Host (L "  Drag & drop file here, enter path, or '0' to return:" "  Перетащите файл, введите путь или '0' для возврата:") -ForegroundColor White
+    Show-Banner "MEDIA CONVERTER"
+    Write-Host ("  Drag & drop file here, enter path, or '0' to return:") -ForegroundColor White
     $raw = Read-Host "  > "
     if ($raw -eq '0' -or [string]::IsNullOrWhiteSpace($raw)) { break }
     
     $path = Get-CleanPath $raw
     $inputFile = Resolve-InputPath $path
     if (-not $inputFile) {
-        Write-Host "  [X] $(L 'File not found' 'Файл не найден'): $path" -ForegroundColor Red
-        Write-Host "`n  $(L 'Press Enter to continue...' 'Нажмите Enter для продолжения...')" -ForegroundColor Gray
+        Write-Host "  [X] $('File not found'): $path" -ForegroundColor Red
+        Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
         Read-Host
         continue
     }
 
     $fileType = Get-FileType $inputFile
     if ($fileType -eq "Unknown") {
-        Write-Host "  [X] $(L 'Unsupported format' 'Неподдерживаемый формат')" -ForegroundColor Red
-        Write-Host "`n  $(L 'Press Enter to continue...' 'Нажмите Enter для продолжения...')" -ForegroundColor Gray
+        Write-Host "  [X] $('Unsupported format')" -ForegroundColor Red
+        Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
         Read-Host
         continue
     }
@@ -201,8 +200,8 @@ do {
 
     $target = Get-FormatArgs -Type $fileType -Choice $choice
     if (-not $target) {
-        Write-Host "  [X] $(L 'Invalid choice' 'Неверный выбор')" -ForegroundColor Red
-        Write-Host "`n  $(L 'Press Enter to continue...' 'Нажмите Enter для продолжения...')" -ForegroundColor Gray
+        Write-Host "  [X] $('Invalid choice')" -ForegroundColor Red
+        Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
         Read-Host
         continue
     }
@@ -211,22 +210,22 @@ do {
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($inputFile)
     $outPath = Join-Path $dir "$baseName`_converted.$($target.Ext)"
 
-    Write-Host "`n  $(L 'Converting...' 'Конвертация...')" -ForegroundColor Yellow
+    Write-Host "`n  $('Converting...')" -ForegroundColor Yellow
     $ffmpegArgs = @("-i", $inputFile) + $target.Args + @("-y", $outPath)
     $logFile = Join-Path $env:TEMP "ffmpeg_conv.txt"
     
     $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $ffmpegArgs -NoNewWindow -Wait -PassThru -RedirectStandardError $logFile
     
     if ($proc.ExitCode -eq 0) {
-        Write-Host "  [OK] $(L 'Saved' 'Сохранено'): $outPath" -ForegroundColor Green
+        Write-Host "  [OK] $('Saved'): $outPath" -ForegroundColor Green
     } else {
-        Write-Host "  [X] $(L 'Conversion failed' 'Ошибка конвертации')" -ForegroundColor Red
+        Write-Host "  [X] $('Conversion failed')" -ForegroundColor Red
         if ($global:Cfg.EnableLogs -and (Test-Path $logFile)) {
             if (-not (Test-Path $global:Cfg.LogsFolder)) { New-Item -ItemType Directory -Path $global:Cfg.LogsFolder | Out-Null }
             Copy-Item $logFile (Join-Path $global:Cfg.LogsFolder "$baseName`_conv.log") -Force
         }
     }
 
-    Write-Host "`n  $(L 'Press Enter to continue...' 'Нажмите Enter для продолжения...')" -ForegroundColor Gray
+    Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
     Read-Host
 } while ($true)

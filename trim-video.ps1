@@ -1,27 +1,26 @@
 $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
-$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{Language="EN"} }
-function L($en, $ru) { if ($global:Cfg.Language -eq 'RU') { return $ru } return $en }
+$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{} }
 function Show-Banner { param([string]$Title) Clear-Host; Write-Host "`n========================================================" -ForegroundColor Cyan; Write-Host "  $Title" -ForegroundColor Yellow; Write-Host "========================================================`n" -ForegroundColor Cyan }
 
 do {
-    Show-Banner (L "VIDEO TRIMMER" "ОБРЕЗКА ВИДЕО")
-    Write-Host "  $(L 'Enter input file path: (drag the file into the window)' 'Введите путь к файлу: (перетащите файл в окно)')" -ForegroundColor White
+    Show-Banner "VIDEO TRIMMER"
+    Write-Host "  $('Enter input file path: (drag the file into the window)')" -ForegroundColor White
     $inPath = (Read-Host "  > ").Trim().Trim('"')
-    if (-not (Test-Path $inPath)) { Write-Host "  [X] $(L 'File not found' 'Файл не найден')" -ForegroundColor Red; Start-Sleep 2; continue }
+    if (-not (Test-Path $inPath)) { Write-Host "  [X] $('File not found')" -ForegroundColor Red; Start-Sleep 2; continue }
 
-    Write-Host "`n  $(L 'Start time (e.g., 1:30 or 1 30):' 'Время начала (например, 1:30 или 1 30):')" -ForegroundColor White
+    Write-Host "`n  $('Start time (e.g., 1:30 or 1 30):')" -ForegroundColor White
     $startRaw = Read-Host "  > "
     $start = $startRaw.Trim().Replace(" ", ":")
-    if ($start -notmatch '^\d+(:\d+){0,2}$') { Write-Host "  [X] $(L 'Invalid time format' 'Неверный формат времени')" -ForegroundColor Red; Start-Sleep 2; continue }
+    if ($start -notmatch '^\d+(:\d+){0,2}$') { Write-Host "  [X] $('Invalid time format')" -ForegroundColor Red; Start-Sleep 2; continue }
 
-    Write-Host "  $(L 'End time (e.g., 1:30 or 1 30):' 'Время окончания (например, 1:30 или 1 30):')" -ForegroundColor White
+    Write-Host "  $('End time (e.g., 1:30 or 1 30):')" -ForegroundColor White
     $endRaw = Read-Host "  > "
     $end = $endRaw.Trim().Replace(" ", ":")
-    if ($end -notmatch '^\d+(:\d+){0,2}$') { Write-Host "  [X] $(L 'Invalid time format' 'Неверный формат времени')" -ForegroundColor Red; Start-Sleep 2; continue }
+    if ($end -notmatch '^\d+(:\d+){0,2}$') { Write-Host "  [X] $('Invalid time format')" -ForegroundColor Red; Start-Sleep 2; continue }
 
-    Write-Host "`n  [1] $(L 'Fast (Stream Copy)' 'Быстро (Копирование потоков)')  [2] $(L 'Exact (Re-encode)' 'Точно (Перекодирование)')" -ForegroundColor White
-    $mode = Read-Host (L "  Mode" "  Режим")
+    Write-Host "`n  [1] $('Fast (Stream Copy)')  [2] $('Exact (Re-encode)')" -ForegroundColor White
+    $mode = Read-Host "  Mode"
     $cArgs = if ($mode -eq '1') { @("-c", "copy") } else { @("-c:v", "libx264", "-c:a", "aac") }
 
     $dir = [System.IO.Path]::GetDirectoryName($inPath)
@@ -33,14 +32,14 @@ do {
     $out = Join-Path $trimmedDir "$base`_trimmed.mp4"
     # -----------------------------------------------
 
-    Write-Host "`n  $(L 'Processing...' 'Обработка...')" -ForegroundColor Yellow
+    Write-Host "`n  $('Processing...')" -ForegroundColor Yellow
     $args = @("-hide_banner", "-loglevel", "error", "-y", "-i", $inPath, "-ss", $start, "-to", $end) + $cArgs + @($out)
     $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $args -NoNewWindow -Wait -PassThru -RedirectStandardError "$env:TEMP\trim.log"
     
-    if ($proc.ExitCode -eq 0) { Write-Host "  [OK] $(L 'Saved' 'Сохранено'): $out" -ForegroundColor Green }
-    else { Write-Host "  [X] $(L 'Error' 'Ошибка')" -ForegroundColor Red }
+    if ($proc.ExitCode -eq 0) { Write-Host "  [OK] $('Saved'): $out" -ForegroundColor Green }
+    else { Write-Host "  [X] $('Error')" -ForegroundColor Red }
 
-    Write-Host "`n  $(L 'Press Enter to return to Hub...' 'Нажмите Enter для возврата в Хаб...')" -ForegroundColor Gray
+    Write-Host "`n  $('Press Enter to return to Hub...')" -ForegroundColor Gray
     Read-Host
     break
 } while ($true)
