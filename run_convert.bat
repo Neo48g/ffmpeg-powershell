@@ -1,12 +1,10 @@
 @echo off
-title Video Compressor
+chcp 866 >nul
+title Media Converter
 cd /d "%~dp0"
 
-:: Родительская папка
-for %%I in (..) do set "VIDEO_FOLDER=%%~fI"
-
-:: Запускаем PowerShell скрипт с передачей пути к папке с видео
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\convert-media.ps1" -InputPath "%VIDEO_FOLDER%"
+:: Запускаем конвертер медиа (путь к файлу запрашивается в скрипте)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\convert-media.ps1"
 
 echo.
 echo -------------------------------------------------------------------

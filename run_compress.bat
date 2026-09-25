@@ -1,12 +1,10 @@
 @echo off
+chcp 866 >nul
 title Video Compressor
 cd /d "%~dp0"
 
-:: Родительская папка
-for %%I in (..) do set "VIDEO_FOLDER=%%~fI"
-
-:: Запускаем PowerShell скрипт с передачей пути к папке с видео
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\compress_video.ps1" -VideoFolder "%VIDEO_FOLDER%"
+:: Запускаем скрипт сжатия видео (папка выбирается в самом скрипте)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\compress_video.ps1"
 
 echo.
 echo -------------------------------------------------------------------

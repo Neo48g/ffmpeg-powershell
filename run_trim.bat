@@ -1,12 +1,10 @@
 @echo off
-title Video Compressor
+chcp 866 >nul
+title Video Trimmer
 cd /d "%~dp0"
 
-:: Родительская папка
-for %%I in (..) do set "VIDEO_FOLDER=%%~fI"
-
-:: Запускаем PowerShell скрипт с передачей пути к папке с видео
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Trim-Video.ps1" -VideoFolder "%VIDEO_FOLDER%"
+:: Запускаем обрезку видео (путь к файлу запрашивается в скрипте)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\trim-video.ps1"
 
 echo.
 echo -------------------------------------------------------------------
