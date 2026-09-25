@@ -1,14 +1,14 @@
 @echo off
 
-:: Set the window title
+:: Устанавливаем заголовок окна
 title FFmpeg Tools Hub Launcher
 
-:: Switch to the directory of this .bat file (needed to locate the other scripts)
+:: Переходим в каталог этого .bat-файла (нужно для поиска остальных скриптов)
 cd /d "%~dp0"
 
-:: Launch the PowerShell script. 
-:: -NoProfile speeds up startup, -ExecutionPolicy Bypass lifts execution restrictions.
+:: Запускаем PowerShell-скрипт.
+:: -NoProfile ускоряет запуск, -ExecutionPolicy Bypass снимает ограничения на выполнение.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "ffmpeg_hub.ps1"
 
-:: If the script finished (or an error occurred), keep the window open until Enter is pressed
+:: Если скрипт завершился (или произошла ошибка), оставляем окно открытым до нажатия Enter
 set /p _="Press Enter to close..."

@@ -5,7 +5,7 @@ $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
 $ToolsDir = Join-Path $ScriptDir "tools"
 
-# --- Global Config Management ---
+# --- Управление глобальной конфигурацией ---
 function Get-Config {
     if (Test-Path $ConfigFile) { return Get-Content $ConfigFile -Raw | ConvertFrom-Json }
     $def = @{ EnableLogs = $true; LogsFolder = (Join-Path $ScriptDir "logs") }
@@ -15,7 +15,7 @@ function Get-Config {
 function Save-Config { param($Cfg) $Cfg | ConvertTo-Json | Out-File $ConfigFile -Encoding UTF8 -Force }
 $global:Cfg = Get-Config
 
-# --- UI Helpers ---
+# --- Вспомогательные функции интерфейса ---
 function Show-Banner {
     param([string]$Title)
     Clear-Host
@@ -24,7 +24,7 @@ function Show-Banner {
     Write-Host "========================================================`n" -ForegroundColor Cyan
 }
 
-# --- Local Tools Path Management ---
+# --- Управление путями к локальным инструментам ---
 function Update-LocalPath {
     if (-not (Test-Path $ToolsDir)) { New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null }
     $ffmpegBin = Join-Path $ToolsDir "ffmpeg\bin"
@@ -48,7 +48,7 @@ function Get-ToolPath {
     }
 }
 
-# --- FFmpeg Detailed Info ---
+# --- Подробная информация о FFmpeg ---
 function Show-FFmpegInfo {
     Show-Banner "FFMPEG DETAILED INFO"
     if (-not (Test-Command "ffmpeg")) { Write-Host "  [X] $('FFmpeg not found')" -ForegroundColor Red; Read-Host; return }
@@ -65,13 +65,13 @@ function Show-FFmpegInfo {
     try { $filtersOutput = & ffmpeg -filters 2>$null } catch {}
     
     $libs = @(
-        @{ Name = "libx264"; Desc = "H.264 encoder"; Check = ($encodersOutput -match "libx264") }
-        @{ Name = "libx265"; Desc = "H.265/HEVC encoder"; Check = ($encodersOutput -match "libx265") }
-        @{ Name = "libsvtav1"; Desc = "AV1 encoder (SVT)"; Check = ($encodersOutput -match "libsvtav1") }
-        @{ Name = "libvmaf"; Desc = "VMAF quality metric"; Check = ($filtersOutput -match "libvmaf") }
-        @{ Name = "nvenc"; Desc = "NVIDIA hardware encoding"; Check = ($encodersOutput -match "nvenc") }
-        @{ Name = "amf"; Desc = "AMD hardware encoding"; Check = ($encodersOutput -match "h264_amf|hevc_amf|av1_amf") }
-        @{ Name = "qsv"; Desc = "Intel hardware encoding"; Check = ($encodersOutput -match "qsv") }
+        @{ Name = "libx264"; Desc = "кодировщик H.264"; Check = ($encodersOutput -match "libx264") }
+        @{ Name = "libx265"; Desc = "кодировщик H.265/HEVC"; Check = ($encodersOutput -match "libx265") }
+        @{ Name = "libsvtav1"; Desc = "кодировщик AV1 (SVT)"; Check = ($encodersOutput -match "libsvtav1") }
+        @{ Name = "libvmaf"; Desc = "метрика качества VMAF"; Check = ($filtersOutput -match "libvmaf") }
+        @{ Name = "nvenc"; Desc = "аппаратное кодирование NVIDIA"; Check = ($encodersOutput -match "nvenc") }
+        @{ Name = "amf"; Desc = "аппаратное кодирование AMD"; Check = ($encodersOutput -match "h264_amf|hevc_amf|av1_amf") }
+        @{ Name = "qsv"; Desc = "аппаратное кодирование Intel"; Check = ($encodersOutput -match "qsv") }
     )
 
     foreach ($lib in $libs) {
@@ -99,7 +99,7 @@ function Show-FFmpegInfo {
     Read-Host
 }
 
-# --- Dependency Management ---
+# --- Управление зависимостями ---
 function Show-DependenciesMenu {
     do {
         Show-Banner "DEPENDENCIES MANAGEMENT"
@@ -211,8 +211,8 @@ function Show-DependenciesMenu {
          }
          '4' { Show-FFmpegInfo }
          
-         # FIX: use return instead of break. 
-         # return immediately exits Show-DependenciesMenu and hands control back to the main Hub loop.
+         # ИСПРАВЛЕНИЕ: используем return вместо break.
+         # return немедленно выходит из Show-DependenciesMenu и передаёт управление обратно главному циклу Хаба.
          '0' { return } 
          
          default { Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red; Start-Sleep 1 }
@@ -220,7 +220,7 @@ function Show-DependenciesMenu {
     } while ($true)
 }
 
-# --- Global Settings ---
+# --- Глобальные настройки ---
 function Show-SettingsMenu {
     Show-Banner "GLOBAL SETTINGS"
     Write-Host "  [1] $('Logging'): $(if ($global:Cfg.EnableLogs) { '[ON]' } else { '[OFF]' })" -ForegroundColor White
@@ -235,7 +235,7 @@ function Show-SettingsMenu {
     }
 }
 
-# --- Guide / Help ---
+# --- Справка / Руководство ---
 function Show-Guide {
     Show-Banner "HELP & GUIDE"
     Write-Host "  $('BASIC SETTINGS')" -ForegroundColor Yellow
@@ -254,7 +254,7 @@ function Show-Guide {
     Read-Host
 }
 
-# --- Main Hub Loop ---
+# --- Главный цикл Хаба ---
 $scripts = @{
     '1' = "compress_video.ps1"
     '2' = "convert-media.ps1"
