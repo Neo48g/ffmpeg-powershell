@@ -3,7 +3,7 @@ $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
 $ToolsDir = Join-Path $ScriptDir "tools"
 
-# --- Local Path Management ---
+# --- Управление локальными путями ---
 if (Test-Path $ToolsDir) {
     if ($env:Path -notlike "*$ToolsDir*") { $env:Path = "$ToolsDir;$env:Path" }
     $ffmpegBin = Join-Path $ToolsDir "ffmpeg\bin"
@@ -13,7 +13,7 @@ if (Test-Path $ToolsDir) {
 $global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{} }
 function Show-Banner { param([string]$Title) Clear-Host; Write-Host "`n========================================================" -ForegroundColor Cyan; Write-Host "  $Title" -ForegroundColor Yellow; Write-Host "========================================================`n" -ForegroundColor Cyan }
 
-# --- Tool Detection ---
+# --- Определение инструментов ---
 $ytdlpExe = Join-Path $ToolsDir "yt-dlp.exe"
 $ytdlpCmd = if (Test-Path $ytdlpExe) { $ytdlpExe } else { "yt-dlp" }
 
@@ -28,7 +28,7 @@ if (-not $isYtDlpInstalled) {
     return
 }
 
-# --- Quality Selection Function ---
+# --- Функция выбора качества ---
 function Select-VideoQuality {
     param([string]$Url, [string[]]$AuthArgs)
     
@@ -66,7 +66,7 @@ function Select-VideoQuality {
                 
                 $fps = if ($f.fps) { "$($f.fps) fps" } else { "N/A" }
                 
-                # Extract the base codec name (e.g. avc1.640028 -> avc1)
+                # Извлекаем базовое название кодека (например, avc1.640028 -> avc1)
                 $vcodec = if ($f.vcodec) { ($f.vcodec -split '\.')[0] } else { "N/A" }
                 
                 $sizeBytes = if ($f.filesize) { $f.filesize } elseif ($f.filesize_approx) { $f.filesize_approx } else { 0 }
@@ -75,8 +75,8 @@ function Select-VideoQuality {
                 elseif ($sizeBytes -ge 1KB) { $sizeStr = "{0:N2} KB" -f ($sizeBytes / 1KB) }
                 else { $sizeStr = "N/A" }
                 
-                # FIX: Always guarantee that an audio track is included. 
-                # If the MP4 format has no audio track, automatically append +ba to download the best audio.
+                # ИСПРАВЛЕНИЕ: всегда гарантируем наличие аудиодорожки.
+                # Если у MP4-формата нет аудиодорожки, автоматически добавляем +ba для загрузки лучшего аудио.
                 $hasAudio = ($f.acodec -ne 'none' -and $f.acodec -ne $null)
                 $downloadId = if ($hasAudio) { $f.format_id } else { "$($f.format_id)+ba" }
                 
@@ -148,7 +148,7 @@ function Select-VideoQuality {
     }
 }
 
-# --- Main Loop ---
+# --- Главный цикл ---
 do {
     Show-Banner "YT-DLP DOWNLOADER"
     

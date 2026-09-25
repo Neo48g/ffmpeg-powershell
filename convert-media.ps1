@@ -167,7 +167,7 @@ function Get-FormatArgs {
     return $null
 }
 
-# Main Loop
+# Главный цикл
 do {
     Show-Banner "MEDIA CONVERTER"
     Write-Host ("  Drag & drop file here, enter path, or '0' to return:") -ForegroundColor White

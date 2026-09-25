@@ -3,7 +3,7 @@ $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
 $PresetsFile = Join-Path $ScriptDir "presets.json"
 
-# --- Global Config ---
+# --- Глобальная конфигурация ---
 $global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$true; LogsFolder=(Join-Path $ScriptDir "logs")} }
 
 function Show-Banner {
@@ -14,7 +14,7 @@ function Show-Banner {
     Write-Host "========================================================`n" -ForegroundColor Cyan
 }
 
-# --- State Variables ---
+# --- Переменные состояния ---
 $script:inputFolder = $ScriptDir
 $script:crfValue = 23; $script:hwDevice = "CPU"; $script:codec = "h264"
 $script:enableVMAF = $false; $script:enableAutoCRF = $false
@@ -24,7 +24,7 @@ $script:presets = @{}
 $extensions = @(".mp4",".mkv",".avi",".mov",".m4v",".webm",".ts",".mts",".flv",".wmv")
 $excludedFolders = @("compressed", "logs")
 
-# --- Presets Management ---
+# --- Управление пресетами ---
 function Load-Presets {
     if (Test-Path $PresetsFile) {
         try {
@@ -88,7 +88,7 @@ function Show-PresetsMenu {
     } while ($true)
 }
 
-# --- Core Settings Helpers ---
+# --- Вспомогательные функции основных настроек ---
 function Get-Files {
     Get-ChildItem -Path $script:inputFolder -File -Recurse:$script:enableRecursiveSearch -ErrorAction SilentlyContinue | Where-Object {
         $isVideo = $extensions -contains $_.Extension.ToLower()
@@ -115,7 +115,7 @@ function Build-FFmpegArgs {
     return $vArgs
 }
 
-# --- Main Menu Loop ---
+# --- Главный цикл меню ---
 Load-Presets
 :MainLoop do {
     Show-Banner "VIDEO COMPRESSION"
@@ -172,7 +172,7 @@ Load-Presets
                 $outFile = Join-Path $outDir "$($f.BaseName)_compressed.mp4"
                 Write-Host "`n  [$i/$($files.Count)] $($f.Name)" -ForegroundColor Yellow
                 
-                # Get duration for the progress bar
+                # Получаем длительность для прогресс-бара
                 $duration = 0
                 try {
                     $durStr = & ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$($f.FullName)" 2>$null
@@ -186,7 +186,7 @@ Load-Presets
                     $args = "-hide_banner -loglevel info -i `"$($f.FullName)`" $vArgs -c:a aac -b:a 128k -y `"$outFile`""
                     $logFile = Join-Path $env:TEMP "ffmpeg_comp.txt"
                     
-                    # Remove the old file before starting so the check is accurate
+                    # Удаляем старый файл перед запуском, чтобы проверка была корректной
                     if (Test-Path $outFile) { Remove-Item $outFile -Force -ErrorAction SilentlyContinue }
                     
                     $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $args -RedirectStandardError $logFile -PassThru -NoNewWindow
@@ -218,14 +218,14 @@ Load-Presets
                     $sw.Stop()
                     Write-Progress -Activity "$('Compressing'): $($f.Name)" -Completed -Id 1
                     
-                    # FIX: Check the output file, not the ExitCode
+                    # ИСПРАВЛЕНИЕ: проверяем выходной файл, а не ExitCode
                     $compressOK = (Test-Path $outFile) -and ((Get-Item $outFile -ErrorAction SilentlyContinue).Length -gt 0)
                     if (-not $compressOK) {
                         Write-Host "  [X] $('FFmpeg Error')" -ForegroundColor Red
                         break
                     }
                     
-                    # VMAF & AutoCRF Logic
+                    # Логика VMAF и AutoCRF
                     $needsRecompress = $false
                     if ($script:enableVMAF -and $iteration -le $script:maxIterations) {
                         Write-Host "  -> $('Calculating VMAF...')" -ForegroundColor White
