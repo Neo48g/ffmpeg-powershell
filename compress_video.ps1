@@ -218,7 +218,7 @@ Load-Presets
                     $sw.Stop()
                     Write-Progress -Activity "$('Compressing'): $($f.Name)" -Completed -Id 1
                     
-                    # ИСПРАВЛЕНИЕ: проверяем выходной файл, а не код завершения (ExitCode)
+                    # проверяем выходной файл, а не код завершения
                     $compressOK = (Test-Path $outFile) -and ((Get-Item $outFile -ErrorAction SilentlyContinue).Length -gt 0)
                     if (-not $compressOK) {
                         Write-Host "  [X] $('FFmpeg Error')" -ForegroundColor Red

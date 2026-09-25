@@ -210,9 +210,6 @@ function Show-DependenciesMenu {
              Read-Host "  Press Enter to continue"
          }
          '4' { Show-FFmpegInfo }
-         
-         # ИСПРАВЛЕНИЕ: используем return вместо break.
-         # return немедленно выходит из Show-DependenciesMenu и передаёт управление обратно главному циклу Хаба.
          '0' { return } 
          
          default { Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red; Start-Sleep 1 }

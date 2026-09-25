@@ -75,7 +75,6 @@ function Select-VideoQuality {
                 elseif ($sizeBytes -ge 1KB) { $sizeStr = "{0:N2} KB" -f ($sizeBytes / 1KB) }
                 else { $sizeStr = "N/A" }
                 
-                # ИСПРАВЛЕНИЕ: всегда гарантируем наличие аудиодорожки.
                 # Если в MP4-формате нет аудиодорожки, автоматически добавляем +ba для загрузки лучшего аудио.
                 $hasAudio = ($f.acodec -ne 'none' -and $f.acodec -ne $null)
                 $downloadId = if ($hasAudio) { $f.format_id } else { "$($f.format_id)+ba" }
