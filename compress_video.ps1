@@ -1,11 +1,10 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
 $PresetsFile = Join-Path $ScriptDir "presets.json"
 
-# --- Global Config & Language ---
-$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{Language="EN"; EnableLogs=$true; LogsFolder=(Join-Path $ScriptDir "logs")} }
-function L($en, $ru) { if ($global:Cfg.Language -eq 'RU') { return $ru } return $en }
+# --- Global Config ---
+$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$true; LogsFolder=(Join-Path $ScriptDir "logs")} }
 
 function Show-Banner {
     param([string]$Title)
@@ -39,16 +38,16 @@ function Save-Presets { $script:presets | ConvertTo-Json -Depth 5 | Out-File -Fi
 
 function Show-PresetsMenu {
     do {
-        Show-Banner (L "PRESETS MANAGEMENT" "УПРАВЛЕНИЕ ПРЕСЕТАМИ")
-        Write-Host "  [1] $(L 'Save current settings' 'Сохранить текущие настройки')" -ForegroundColor White
-        Write-Host "  [2] $(L 'Load preset' 'Загрузить пресет')" -ForegroundColor White
-        Write-Host "  [3] $(L 'Delete preset' 'Удалить пресет')" -ForegroundColor White
-        Write-Host "`n  [0] $(L 'Back' 'Назад')" -ForegroundColor Red
+        Show-Banner "PRESETS MANAGEMENT"
+        Write-Host "  [1] $('Save current settings')" -ForegroundColor White
+        Write-Host "  [2] $('Load preset')" -ForegroundColor White
+        Write-Host "  [3] $('Delete preset')" -ForegroundColor White
+        Write-Host "`n  [0] $('Back')" -ForegroundColor Red
         
-        $c = Read-Host (L "  Choice" "  Выбор")
+        $c = Read-Host "  Choice"
         switch ($c) {
             '1' {
-                $name = Read-Host (L "  Enter preset name" "  Введите имя пресета")
+                $name = Read-Host "  Enter preset name"
                 if ([string]::IsNullOrWhiteSpace($name)) { continue }
                 $script:presets[$name] = @{
                     HwDevice=$script:hwDevice; Codec=$script:codec; CRF=$script:crfValue
@@ -56,31 +55,31 @@ function Show-PresetsMenu {
                     VMAFThreshold=$script:vmafThreshold; MaxIterations=$script:maxIterations; MinCRF=$script:minCRF
                 }
                 Save-Presets
-                Write-Host "`n  [OK] $(L 'Preset saved' 'Пресет сохранен')" -ForegroundColor Green
+                Write-Host "`n  [OK] $('Preset saved')" -ForegroundColor Green
                 Start-Sleep 1
             }
             '2' {
-                if ($script:presets.Count -eq 0) { Write-Host "`n  [X] $(L 'No presets saved' 'Нет сохраненных пресетов')" -ForegroundColor Red; Start-Sleep 1; continue }
+                if ($script:presets.Count -eq 0) { Write-Host "`n  [X] $('No presets saved')" -ForegroundColor Red; Start-Sleep 1; continue }
                 $keys = $script:presets.Keys | Sort-Object; $i = 1
                 foreach ($k in $keys) { Write-Host "  [$i] $k ($($script:presets[$k].HwDevice) | $($script:presets[$k].Codec) | CRF:$($script:presets[$k].CRF))" -ForegroundColor White; $i++ }
-                $idx = Read-Host (L "  Select number" "  Выберите номер")
+                $idx = Read-Host "  Select number"
                 if ($idx -match '^\d+$' -and [int]$idx -ge 1 -and [int]$idx -le $keys.Count) {
                     $p = $script:presets[$keys[[int]$idx - 1]]
                     $script:hwDevice=$p.HwDevice; $script:codec=$p.Codec; $script:crfValue=[int]$p.CRF
                     $script:enableVMAF=[bool]$p.EnableVMAF; $script:enableAutoCRF=[bool]$p.EnableAutoCRF
                     $script:vmafThreshold=[int]$p.VMAFThreshold; $script:maxIterations=[int]$p.MaxIterations; $script:minCRF=[int]$p.MinCRF
-                    Write-Host "`n  [OK] $(L 'Preset loaded' 'Пресет загружен')" -ForegroundColor Green
+                    Write-Host "`n  [OK] $('Preset loaded')" -ForegroundColor Green
                     Start-Sleep 1
                 }
             }
             '3' {
-                if ($script:presets.Count -eq 0) { Write-Host "`n  [X] $(L 'No presets saved' 'Нет сохраненных пресетов')" -ForegroundColor Red; Start-Sleep 1; continue }
+                if ($script:presets.Count -eq 0) { Write-Host "`n  [X] $('No presets saved')" -ForegroundColor Red; Start-Sleep 1; continue }
                 $keys = $script:presets.Keys | Sort-Object; $i = 1
                 foreach ($k in $keys) { Write-Host "  [$i] $k" -ForegroundColor White; $i++ }
-                $idx = Read-Host (L "  Select number to delete" "  Выберите номер для удаления")
+                $idx = Read-Host "  Select number to delete"
                 if ($idx -match '^\d+$' -and [int]$idx -ge 1 -and [int]$idx -le $keys.Count) {
                     $script:presets.Remove($keys[[int]$idx - 1]); Save-Presets
-                    Write-Host "`n  [OK] $(L 'Preset deleted' 'Пресет удален')" -ForegroundColor Green
+                    Write-Host "`n  [OK] $('Preset deleted')" -ForegroundColor Green
                     Start-Sleep 1
                 }
             }
@@ -119,45 +118,45 @@ function Build-FFmpegArgs {
 # --- Main Menu Loop ---
 Load-Presets
 :MainLoop do {
-    Show-Banner (L "VIDEO COMPRESSION" "СЖАТИЕ ВИДЕО")
+    Show-Banner "VIDEO COMPRESSION"
     $files = Get-Files
-    Write-Host "  $(L 'Folder' 'Папка'): $script:inputFolder" -ForegroundColor Gray
-    Write-Host "  $(L 'Files' 'Файлы'): $($files.Count) | $(L 'HW' 'Железо'): $script:hwDevice | $(L 'Codec' 'Кодек'): $script:codec | $(L 'CRF' 'CRF'): $script:crfValue" -ForegroundColor White
-    Write-Host "  $(L 'VMAF' 'VMAF'): $(if($script:enableVMAF){'ON'}else{'OFF'}) | $(L 'AutoCRF' 'АвтоCRF'): $(if($script:enableAutoCRF){'ON'}else{'OFF'}) | $(L 'Presets' 'Пресеты'): $($script:presets.Count)" -ForegroundColor White
+    Write-Host "  $('Folder'): $script:inputFolder" -ForegroundColor Gray
+    Write-Host "  $('Files'): $($files.Count) | $('HW'): $script:hwDevice | $('Codec'): $script:codec | $('CRF'): $script:crfValue" -ForegroundColor White
+    Write-Host "  $('VMAF'): $(if($script:enableVMAF){'ON'}else{'OFF'}) | $('AutoCRF'): $(if($script:enableAutoCRF){'ON'}else{'OFF'}) | $('Presets'): $($script:presets.Count)" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  [1] $(L 'Change Folder' 'Изменить папку')" -ForegroundColor White
-    Write-Host "  [2] $(L 'Hardware & Codec' 'Железо и Кодек')" -ForegroundColor White
-    Write-Host "  [3] $(L 'Quality & VMAF' 'Качество и VMAF')" -ForegroundColor White
-    Write-Host "  [4] $(L 'Presets Management' 'Управление пресетами')" -ForegroundColor White
-    Write-Host "  [5] $(L 'Toggle Recursive' 'Рекурсивный поиск'): $(if($script:enableRecursiveSearch){'ON'}else{'OFF'})" -ForegroundColor White
+    Write-Host "  [1] $('Change Folder')" -ForegroundColor White
+    Write-Host "  [2] $('Hardware & Codec')" -ForegroundColor White
+    Write-Host "  [3] $('Quality & VMAF')" -ForegroundColor White
+    Write-Host "  [4] $('Presets Management')" -ForegroundColor White
+    Write-Host "  [5] $('Toggle Recursive'): $(if($script:enableRecursiveSearch){'ON'}else{'OFF'})" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  [0] $(L 'START COMPRESSION' 'НАЧАТЬ СЖАТИЕ')" -ForegroundColor Green
-    Write-Host "  [9] $(L 'Back to Hub' 'Вернуться в Хаб')" -ForegroundColor Red
+    Write-Host "  [0] $('START COMPRESSION')" -ForegroundColor Green
+    Write-Host "  [9] $('Back to Hub')" -ForegroundColor Red
     
-    $c = Read-Host (L "  Choice" "  Выбор")
+    $c = Read-Host "  Choice"
     switch ($c) {
         '1' {
             Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog
             if ($d.ShowDialog() -eq 'OK') { $script:inputFolder = $d.SelectedPath }
         }
         '2' {
-            Show-Banner (L "HARDWARE & CODEC" "ЖЕЛЕЗО И КОДЕК")
+            Show-Banner "HARDWARE & CODEC"
             Write-Host "  [1] CPU  [2] NVIDIA  [3] AMD  [4] Intel" -ForegroundColor White
-            $hwC = Read-Host (L "  Select HW" "  Выберите железо")
+            $hwC = Read-Host "  Select HW"
             $script:hwDevice = switch($hwC) { '1'{'CPU'} '2'{'NVIDIA'} '3'{'AMD'} '4'{'Intel'} default{'CPU'} }
             Write-Host "  [1] H.264  [2] H.265  [3] AV1" -ForegroundColor White
-            $cC = Read-Host (L "  Select Codec" "  Выберите кодек")
+            $cC = Read-Host "  Select Codec"
             $script:codec = switch($cC) { '1'{'h264'} '2'{'h265'} '3'{'av1'} default{'h264'} }
         }
         '3' {
-            Show-Banner (L "QUALITY & VMAF" "КАЧЕСТВО И VMAF")
-            $v = Read-Host (L "  CRF (0-51) [$script:crfValue]" "  CRF (0-51) [$script:crfValue]")
+            Show-Banner "QUALITY & VMAF"
+            $v = Read-Host "  CRF (0-51) [$script:crfValue]"
             if ($v -match '^\d+$') { $script:crfValue = [int]$v }
-            $script:enableVMAF = (Read-Host (L "  Enable VMAF? (Y/N)" "  Включить VMAF? (Y/N)")) -match '^[Yy]'
+            $script:enableVMAF = (Read-Host "  Enable VMAF? (Y/N)") -match '^[Yy]'
             if ($script:enableVMAF) {
-                $script:enableAutoCRF = (Read-Host (L "  Enable AutoCRF? (Y/N)" "  Включить АвтоCRF? (Y/N)")) -match '^[Yy]'
+                $script:enableAutoCRF = (Read-Host "  Enable AutoCRF? (Y/N)") -match '^[Yy]'
                 if ($script:enableAutoCRF) {
-                    $t = Read-Host (L "  VMAF Threshold (0-100) [$script:vmafThreshold]" "  Порог VMAF (0-100) [$script:vmafThreshold]")
+                    $t = Read-Host "  VMAF Threshold (0-100) [$script:vmafThreshold]"
                     if ($t -match '^\d+$') { $script:vmafThreshold = [int]$t }
                 }
             }
@@ -165,7 +164,7 @@ Load-Presets
         '4' { Show-PresetsMenu }
         '5' { $script:enableRecursiveSearch = -not $script:enableRecursiveSearch }
         '0' {
-            if ($files.Count -eq 0) { Write-Host "`n  [X] $(L 'No files found' 'Файлы не найдены')" -ForegroundColor Red; Start-Sleep 2; continue }
+            if ($files.Count -eq 0) { Write-Host "`n  [X] $('No files found')" -ForegroundColor Red; Start-Sleep 2; continue }
             $outDir = Join-Path $script:inputFolder "compressed"
             if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
             
@@ -173,7 +172,7 @@ Load-Presets
                 $outFile = Join-Path $outDir "$($f.BaseName)_compressed.mp4"
                 Write-Host "`n  [$i/$($files.Count)] $($f.Name)" -ForegroundColor Yellow
                 
-                # Получение длительности для прогресс-бара
+                # Get duration for the progress bar
                 $duration = 0
                 try {
                     $durStr = & ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$($f.FullName)" 2>$null
@@ -187,7 +186,7 @@ Load-Presets
                     $args = "-hide_banner -loglevel info -i `"$($f.FullName)`" $vArgs -c:a aac -b:a 128k -y `"$outFile`""
                     $logFile = Join-Path $env:TEMP "ffmpeg_comp.txt"
                     
-                    # Убираем старый файл перед запуском, чтобы проверка была точной
+                    # Remove the old file before starting so the check is accurate
                     if (Test-Path $outFile) { Remove-Item $outFile -Force -ErrorAction SilentlyContinue }
                     
                     $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $args -RedirectStandardError $logFile -PassThru -NoNewWindow
@@ -210,26 +209,26 @@ Load-Presets
                         if ($duration -gt 0) { $percent = [math]::Min(100, ($currentTime / $duration) * 100) }
                         
                         $elapsed = $sw.Elapsed.ToString('hh\:mm\:ss')
-                        $status = "$(L 'Time' 'Время'): $elapsed"
-                        if ($duration -gt 0) { $status += " | $(L 'Progress' 'Прогресс'): $([math]::Round($percent, 1))%" }
+                        $status = "$('Time'): $elapsed"
+                        if ($duration -gt 0) { $status += " | $('Progress'): $([math]::Round($percent, 1))%" }
                         
-                        Write-Progress -Activity "$(L 'Compressing' 'Сжатие'): $($f.Name)" -Status $status -PercentComplete $percent -Id 1
+                        Write-Progress -Activity "$('Compressing'): $($f.Name)" -Status $status -PercentComplete $percent -Id 1
                         Start-Sleep -Milliseconds 500
                     }
                     $sw.Stop()
-                    Write-Progress -Activity "$(L 'Compressing' 'Сжатие'): $($f.Name)" -Completed -Id 1
+                    Write-Progress -Activity "$('Compressing'): $($f.Name)" -Completed -Id 1
                     
-                    # ИСПРАВЛЕНИЕ: Проверяем файл, а не ExitCode
+                    # FIX: Check the output file, not the ExitCode
                     $compressOK = (Test-Path $outFile) -and ((Get-Item $outFile -ErrorAction SilentlyContinue).Length -gt 0)
                     if (-not $compressOK) {
-                        Write-Host "  [X] $(L 'FFmpeg Error' 'Ошибка FFmpeg')" -ForegroundColor Red
+                        Write-Host "  [X] $('FFmpeg Error')" -ForegroundColor Red
                         break
                     }
                     
                     # VMAF & AutoCRF Logic
                     $needsRecompress = $false
                     if ($script:enableVMAF -and $iteration -le $script:maxIterations) {
-                        Write-Host "  -> $(L 'Calculating VMAF...' 'Расчет VMAF...')" -ForegroundColor White
+                        Write-Host "  -> $('Calculating VMAF...')" -ForegroundColor White
                         $vmafArgs = "-hide_banner -loglevel info -i `"$($f.FullName)`" -i `"$outFile`" -lavfi `"[0:v]scale=1920:1080,fps=30[ref];[1:v]scale=1920:1080,fps=30[dist];[ref][dist]libvmaf`" -f null -"
                         $vmafLog = Join-Path $env:TEMP "vmaf_log.txt"
                         
@@ -251,12 +250,12 @@ Load-Presets
                             $vmafPercent = 0
                             if ($duration -gt 0) { $vmafPercent = [math]::Min(100, ($vmafTime / $duration) * 100) }
                             $vmafElapsed = $vmafSw.Elapsed.ToString('hh\:mm\:ss')
-                            $vmafStatus = "$(L 'Time' 'Время'): $vmafElapsed | $(L 'Progress' 'Прогресс'): $([math]::Round($vmafPercent, 1))%"
-                            Write-Progress -Activity "$(L 'Calculating VMAF' 'Расчет VMAF'): $($f.Name)" -Status $vmafStatus -PercentComplete $vmafPercent -Id 2
+                            $vmafStatus = "$('Time'): $vmafElapsed | $('Progress'): $([math]::Round($vmafPercent, 1))%"
+                            Write-Progress -Activity "$('Calculating VMAF'): $($f.Name)" -Status $vmafStatus -PercentComplete $vmafPercent -Id 2
                             Start-Sleep -Milliseconds 500
                         }
                         $vmafSw.Stop()
-                        Write-Progress -Activity "$(L 'Calculating VMAF' 'Расчет VMAF'): $($f.Name)" -Completed -Id 2
+                        Write-Progress -Activity "$('Calculating VMAF'): $($f.Name)" -Completed -Id 2
 
                         $vmafScore = 0
                         if (Test-Path $vmafLog) {
@@ -271,15 +270,15 @@ Load-Presets
                             $currentCRF -= 2
                             $needsRecompress = $true
                             Remove-Item $outFile -Force -ErrorAction SilentlyContinue
-                            Write-Host "  -> $(L 'AutoCRF: Retrying with CRF' 'АвтоCRF: Повтор с CRF') $currentCRF" -ForegroundColor Cyan
+                            Write-Host "  -> $('AutoCRF: Retrying with CRF') $currentCRF" -ForegroundColor Cyan
                         }
                     }
                 }
                 
-                if (Test-Path $outFile) { Write-Host "  [OK] $(L 'Saved' 'Сохранено')" -ForegroundColor Green }
+                if (Test-Path $outFile) { Write-Host "  [OK] $('Saved')" -ForegroundColor Green }
                 $i++
             }
-            Write-Host "`n  [OK] $(L 'Done! Press Enter to return.' 'Готово! Нажмите Enter.')" -ForegroundColor Green
+            Write-Host "`n  [OK] $('Done! Press Enter to return.')" -ForegroundColor Green
             Read-Host
             break MainLoop
         }
