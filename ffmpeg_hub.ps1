@@ -49,29 +49,45 @@ function Get-ToolPath {
 }
 
 # --- Подробная информация о FFmpeg ---
+function Test-CommandExists {
+    param([string]$Name)
+    return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
 function Show-FFmpegInfo {
     Show-Banner "FFMPEG DETAILED INFO"
-    if (-not (Test-Command "ffmpeg")) { Write-Host "  [X] $('FFmpeg not found')" -ForegroundColor Red; Read-Host; return }
+    $ffPath = Get-ToolPath "ffmpeg"
+    if (-not $ffPath) { Write-Host "  [X] $('FFmpeg not found')" -ForegroundColor Red; Read-Host; return }
 
     Write-Host "  $('VERSION')" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
-    try { Write-Host "  $(& ffmpeg -version 2>$null | Select-Object -First 1)" -ForegroundColor White } catch {}
+    try { Write-Host "  $(& $ffPath -version 2>$null | Select-Object -First 1)" -ForegroundColor White } catch {}
+
+    # FFmpeg выводит список кодировщиков/фильтров в консольную кодовую страницу (OEM, cp866 в Windows),
+    # а не в UTF-8. Включем UTF-8 в сессии и меняем кодовую страницы консоли на 65001,
+    # чтобы русские подписи ниже читались корректно.
+    try { $prevEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+    $utf8Session = $false
+    try {
+        & chcp.com 65001 | Out-Null
+        if ($LASTEXITCODE -eq 0) { $utf8Session = $true }
+    } catch {}
 
     Write-Host "`n  $('KEY LIBRARIES & CODECS')" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
 
     $encodersOutput = ""; $filtersOutput = ""
-    try { $encodersOutput = & ffmpeg -encoders 2>$null } catch {}
-    try { $filtersOutput = & ffmpeg -filters 2>$null } catch {}
+    try { $encodersOutput = & $ffPath -hide_banner -encoders 2>$null } catch {}
+    try { $filtersOutput = & $ffPath -hide_banner -filters 2>$null } catch {}
 
     $libs = @(
-        @{ Name = "libx264"; Desc = "кодировщик H.264"; Check = ($encodersOutput -match "libx264") }
-        @{ Name = "libx265"; Desc = "кодировщик H.265/HEVC"; Check = ($encodersOutput -match "libx265") }
-        @{ Name = "libsvtav1"; Desc = "кодировщик AV1 (SVT)"; Check = ($encodersOutput -match "libsvtav1") }
-        @{ Name = "libvmaf"; Desc = "метрика качества VMAF"; Check = ($filtersOutput -match "libvmaf") }
-        @{ Name = "nvenc"; Desc = "аппаратное кодирование NVIDIA"; Check = ($encodersOutput -match "nvenc") }
-        @{ Name = "amf"; Desc = "аппаратное кодирование AMD"; Check = ($encodersOutput -match "h264_amf|hevc_amf|av1_amf") }
-        @{ Name = "qsv"; Desc = "аппаратное кодирование Intel"; Check = ($encodersOutput -match "qsv") }
+        @{ Name = "libx264"; Desc = "H.264 encoder"; Check = ($encodersOutput -match "libx264") }
+        @{ Name = "libx265"; Desc = "H.265/HEVC encoder"; Check = ($encodersOutput -match "libx265") }
+        @{ Name = "libsvtav1"; Desc = "AV1 encoder (SVT)"; Check = ($encodersOutput -match "libsvtav1") }
+        @{ Name = "libvmaf"; Desc = "VMAF quality metric"; Check = ($filtersOutput -match "libvmaf") }
+        @{ Name = "nvenc"; Desc = "NVIDIA hardware encoding"; Check = ($encodersOutput -match "nvenc") }
+        @{ Name = "amf"; Desc = "AMD hardware encoding"; Check = ($encodersOutput -match "h264_amf|hevc_amf|av1_amf") }
+        @{ Name = "qsv"; Desc = "Intel hardware encoding"; Check = ($encodersOutput -match "qsv") }
     )
 
     foreach ($lib in $libs) {
@@ -97,6 +113,10 @@ function Show-FFmpegInfo {
 
     Write-Host "`n  $('Press Enter to return...')" -ForegroundColor Gray
     Read-Host
+    try {
+        if ($utf8Session) { & chcp.com $prevEncoding.CodePage | Out-Null }
+        [Console]::OutputEncoding = $prevEncoding
+    } catch {}
 }
 
 # --- Управление зависимостями ---
