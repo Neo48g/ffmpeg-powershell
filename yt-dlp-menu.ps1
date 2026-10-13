@@ -251,7 +251,7 @@ do {
                 Write-Host "$defaultPath" -ForegroundColor Cyan
                 Write-Host "  $('Press Enter to use saved path, or enter a new one'):" -ForegroundColor Gray
             } else {
-                Write-Host "`n  $('Enter path to cookies.txt:')" -ForegroundColor White
+                Write-Host "`n  $('Enter path to cookies.txt: (drag in window)')" -ForegroundColor White
             }
 
             $inputPath = (Read-Host "  > ").Trim().Trim('"')

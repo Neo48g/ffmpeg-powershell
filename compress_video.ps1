@@ -15,8 +15,8 @@ function Show-Banner {
 }
 
 # --- Переменные состояния ---
-# Файлы для сжатия берутся из папки forСompress (создаётся автоматически, если отсутствует)
-$script:compressSourceFolder = Join-Path $ScriptDir "forCompress"
+# Файлы для сжатия берутся из папки inputCompress (создаётся автоматически, если отсутствует)
+$script:compressSourceFolder = Join-Path $ScriptDir "inputCompress"
 if (-not (Test-Path $script:compressSourceFolder)) {
     New-Item -ItemType Directory -Path $script:compressSourceFolder -Force | Out-Null
 }
@@ -96,8 +96,9 @@ function Show-PresetsMenu {
 # --- Логирование ошибок и зависаний ---
 # Файл лога ошибок создаётся в корневой папке скрипта (рядом с compress_video.ps1)
 $script:ErrorLogFile = Join-Path $ScriptDir "compression_errors.log"
-$script:NoProgressTimeoutSec = 60     # секунд без прогресса => процесс считается зависшим
-$script:MaxRuntimeSec = 7200          # максимальное время обработки одного файла (сек)
+$script:NoProgressTimeoutSec = 300     # секунд без прогресса => процесс считается зависшим
+# $script:MaxRuntimeSec = 7200          # максимальное время обработки одного файла (сек)
+
 # Значения можно переопределить в global_config.json: NoProgressTimeoutSec / MaxRuntimeSec
 if ($null -ne $global:Cfg.NoProgressTimeoutSec) { $script:NoProgressTimeoutSec = [int]$global:Cfg.NoProgressTimeoutSec }
 if ($null -ne $global:Cfg.MaxRuntimeSec)        { $script:MaxRuntimeSec = [int]$global:Cfg.MaxRuntimeSec }
@@ -269,17 +270,16 @@ Load-Presets
         '5' { $script:enableRecursiveSearch = -not $script:enableRecursiveSearch }
         '0' {
             if ($files.Count -eq 0) { Write-Host "`n  [X] $('No files found')" -ForegroundColor Red; Start-Sleep 2; continue }
-            # Папка результата создаётся в той же папке, где лежит исходный файл (например: ...\compressed)
+            # Папка результата создаётся в главной директории скрипта (например: $ScriptDir\compressed)
             function Get-CompressedOutFile {
                 param([System.IO.FileInfo]$SrcFile)
-                $srcDir = $SrcFile.DirectoryName
-                $outDir = Join-Path $srcDir "compressed"
+                $outDir = Join-Path $ScriptDir "compressed"
                 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
                 return Join-Path $outDir "$($SrcFile.BaseName)_compressed.mp4"
             }
 
             # Пишем в корневой лог начало каждого прогона сжатия (INFO) — ошибки ищутся по метке [ERROR]/[HANG]
-            Write-ErrorLog -Type "INFO" -FileName "$($files.Count) file(s)" -Details "Run started | Output: <srcDir>\compressed\*_compressed.mp4" | Out-Null
+            Write-ErrorLog -Type "INFO" -FileName "$($files.Count) file(s)" -Details "Run started | Output: $ScriptDir\compressed\*_compressed.mp4" | Out-Null
 
             try {
             $i = 1; foreach ($f in $files) {
