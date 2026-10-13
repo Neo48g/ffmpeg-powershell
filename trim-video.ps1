@@ -28,6 +28,7 @@ do {
     $cArgs = if ($mode -eq '1') { @("-c", "copy") } else { @("-c:v", "libx264", "-c:a", "aac") }
 
     $dir = [System.IO.Path]::GetDirectoryName($inPath)
+    # Папка результата под вид операции: ...\trimmed
     $trimmedDir = Join-Path $dir "trimmed"
     if (-not (Test-Path $trimmedDir)) {
         New-Item -ItemType Directory -Path $trimmedDir -Force | Out-Null

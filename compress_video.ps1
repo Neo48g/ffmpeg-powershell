@@ -15,14 +15,19 @@ function Show-Banner {
 }
 
 # --- Переменные состояния ---
-$script:inputFolder = $ScriptDir
+# Файлы для сжатия берутся из папки forСompress (создаётся автоматически, если отсутствует)
+$script:compressSourceFolder = Join-Path $ScriptDir "forCompress"
+if (-not (Test-Path $script:compressSourceFolder)) {
+    New-Item -ItemType Directory -Path $script:compressSourceFolder -Force | Out-Null
+}
+$script:inputFolder = $script:compressSourceFolder
 $script:crfValue = 23; $script:hwDevice = "CPU"; $script:codec = "h264"
 $script:enableVMAF = $false; $script:enableAutoCRF = $false
 $script:vmafThreshold = 90; $script:maxIterations = 3; $script:minCRF = 18
 $script:enableRecursiveSearch = $false
 $script:presets = @{}
 $extensions = @(".mp4",".mkv",".avi",".mov",".m4v",".webm",".ts",".mts",".flv",".wmv")
-$excludedFolders = @("compressed", "logs")
+$excludedFolders = @("compressed", "trimmed", "converted", "downloaded", "logs")
 
 # --- Управление пресетами ---
 function Load-Presets {
@@ -90,8 +95,8 @@ function Show-PresetsMenu {
 
 # --- Логирование ошибок и зависаний ---
 $script:ErrorLogFile = Join-Path $ScriptDir "compression_errors.log"
-$script:NoProgressTimeoutSec = 300   # секунд без прогресса => процесс считается зависшим
-$script:MaxRuntimeSec = 7200         # максимальное время обработки одного файла
+$script:NoProgressTimeoutSec = 60   # секунд без прогресса => процесс считается зависшим
+# $script:MaxRuntimeSec = 7200         максимальное время обработки одного файла
 
 function Write-ErrorLog {
     param(
@@ -197,11 +202,17 @@ Load-Presets
         '5' { $script:enableRecursiveSearch = -not $script:enableRecursiveSearch }
         '0' {
             if ($files.Count -eq 0) { Write-Host "`n  [X] $('No files found')" -ForegroundColor Red; Start-Sleep 2; continue }
-            $outDir = Join-Path $script:inputFolder "compressed"
-            if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+            # Папка результата создаётся в той же папке, где лежит исходный файл (например: ...\compressed)
+            function Get-CompressedOutFile {
+                param([System.IO.FileInfo]$SrcFile)
+                $srcDir = $SrcFile.DirectoryName
+                $outDir = Join-Path $srcDir "compressed"
+                if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+                return Join-Path $outDir "$($SrcFile.BaseName)_compressed.mp4"
+            }
 
             $i = 1; foreach ($f in $files) {
-                $outFile = Join-Path $outDir "$($f.BaseName)_compressed.mp4"
+                $outFile = Get-CompressedOutFile -SrcFile $f
                 Write-Host "`n  [$i/$($files.Count)] $($f.Name)" -ForegroundColor Yellow
 
                 # Получаем длительность для индикатора выполнения

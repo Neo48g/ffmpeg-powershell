@@ -235,7 +235,11 @@ do {
 
     $dir = [System.IO.Path]::GetDirectoryName($inputFile)
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($inputFile)
-    $outPath = Join-Path $dir "$baseName`_converted.$($target.Ext)"
+
+    # Папка результата под вид операции: ...\converted
+    $outDir = Join-Path $dir "converted"
+    if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+    $outPath = Join-Path $outDir "$baseName`_converted.$($target.Ext)"
 
     Write-Host "`n  $('Converting...')" -ForegroundColor Yellow
     $ffmpegArgs = @("-i", $inputFile) + $target.Args + @("-y", $outPath)

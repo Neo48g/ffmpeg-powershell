@@ -31,11 +31,11 @@ if (-not $isYtDlpInstalled) {
 # --- Функция выбора качества ---
 function Select-VideoQuality {
     param([string]$Url, [string[]]$AuthArgs)
-    
+
     Write-Host "`n  $('Fetching available formats...')" -ForegroundColor Cyan
     $fetchArgs = $AuthArgs + @("-J", "--no-colors", $Url)
     $jsonOutput = & $ytdlpCmd @fetchArgs 2>$null
-    
+
     try {
         $videoData = $jsonOutput | ConvertFrom-Json
         $formats = $videoData.formats
@@ -46,14 +46,14 @@ function Select-VideoQuality {
 
     $allowedHeights = @(480, 720, 1080, 1440, 2160, 4320)
     $parsedFormats = @()
-    
+
     foreach ($f in $formats) {
         if ($f.ext -eq 'mp4' -and $f.vcodec -ne 'none' -and $f.vcodec -ne $null) {
             $height = $f.height
             if (-not $height -and $f.resolution -match '(\d+)x(\d+)') {
                 $height = [int]$matches[2]
             }
-            
+
             if ($allowedHeights -contains $height) {
                 $label = switch ($height) {
                     480  { "480p" }
@@ -63,22 +63,22 @@ function Select-VideoQuality {
                     2160 { "2160p (4K)" }
                     4320 { "4320p (8K)" }
                 }
-                
+
                 $fps = if ($f.fps) { "$($f.fps) fps" } else { "N/A" }
-                
+
                 # Извлекаем базовое имя кодека (напр. avc1.640028 -> avc1)
                 $vcodec = if ($f.vcodec) { ($f.vcodec -split '\.')[0] } else { "N/A" }
-                
+
                 $sizeBytes = if ($f.filesize) { $f.filesize } elseif ($f.filesize_approx) { $f.filesize_approx } else { 0 }
                 if ($sizeBytes -ge 1GB) { $sizeStr = "{0:N2} GB" -f ($sizeBytes / 1GB) }
                 elseif ($sizeBytes -ge 1MB) { $sizeStr = "{0:N2} MB" -f ($sizeBytes / 1MB) }
                 elseif ($sizeBytes -ge 1KB) { $sizeStr = "{0:N2} KB" -f ($sizeBytes / 1KB) }
                 else { $sizeStr = "N/A" }
-                
+
                 # Если в MP4-формате нет аудиодорожки, автоматически добавляем +ba для загрузки лучшего аудио.
                 $hasAudio = ($f.acodec -ne 'none' -and $f.acodec -ne $null)
                 $downloadId = if ($hasAudio) { $f.format_id } else { "$($f.format_id)+ba" }
-                
+
                 $parsedFormats += @{
                     ID = $f.format_id
                     DownloadID = $downloadId
@@ -103,7 +103,7 @@ function Select-VideoQuality {
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ("  {0,-6} {1,-10} {2,-20} {3,-10} {4,-10} {5}" -f "#", "ID", ("Resolution"), "Codec", "FPS", ("Size")) -ForegroundColor Gray
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
-    
+
     $i = 1
     $idMap = @{}
     foreach ($fmt in $parsedFormats) {
@@ -122,21 +122,21 @@ function Select-VideoQuality {
         Write-Host (" {0,-10}" -f $fmt.Codec) -NoNewline -ForegroundColor Cyan
         Write-Host (" {0,-10}" -f $fmt.FPS) -NoNewline -ForegroundColor White
         Write-Host (" {0}" -f $fmt.Size) -ForegroundColor Cyan
-        
+
         $idMap[$i] = $fmt.DownloadID
         $i++
     }
-    
+
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  $('Enter number from the list, or press Enter for best quality.')" -ForegroundColor White
-    
+
     $userChoice = Read-Host "`n  $('Choice')"
-    
+
     if ([string]::IsNullOrWhiteSpace($userChoice) -or $userChoice -eq '0') {
         Write-Host "  -> $('Using best available quality.')" -ForegroundColor Green
         return "bv+ba/b"
-    } 
-    
+    }
+
     if ($userChoice -match '^\d+$' -and $idMap.ContainsKey([int]$userChoice)) {
         $selectedId = $idMap[[int]$userChoice]
         Write-Host "  -> $('Using format ID:') $selectedId" -ForegroundColor Green
@@ -150,7 +150,7 @@ function Select-VideoQuality {
 # --- Главный цикл ---
 do {
     Show-Banner "YT-DLP DOWNLOADER"
-    
+
     Write-Host "  $('STEP 1: AUTHENTICATION METHOD')" -ForegroundColor Yellow
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [1] $('Standard (No cookies)')" -ForegroundColor White
@@ -159,11 +159,11 @@ do {
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [4] $('Clear yt-dlp Cache')" -ForegroundColor White
     Write-Host "  [0] $('Back to Hub')" -ForegroundColor Red
-    
+
     $authChoice = Read-Host "  Choice"
-    
+
     if ($authChoice -eq '0') { return }
-    
+
     if ($authChoice -eq '4') {
         Write-Host "`n  $('Clearing cache...')" -ForegroundColor Cyan
         & $ytdlpCmd --rm-cache-dir
@@ -172,7 +172,7 @@ do {
         Read-Host
         continue
     }
-    
+
     if ($authChoice -match '^[1-3]$') {
         $authArgs = @()
         if ($authChoice -eq '2') {
@@ -185,7 +185,7 @@ do {
         }
         elseif ($authChoice -eq '3') {
             $defaultPath = $global:Cfg.CookiesPath
-            
+
             if ($defaultPath) {
                 Write-Host "`n  $('Saved cookies path'): " -ForegroundColor White -NoNewline
                 Write-Host "$defaultPath" -ForegroundColor Cyan
@@ -193,9 +193,9 @@ do {
             } else {
                 Write-Host "`n  $('Enter path to cookies.txt:')" -ForegroundColor White
             }
-            
+
             $inputPath = (Read-Host "  > ").Trim().Trim('"')
-            
+
             if ([string]::IsNullOrWhiteSpace($inputPath)) {
                 $cookiePath = $defaultPath
             } else {
@@ -208,14 +208,14 @@ do {
                 Read-Host
                 continue
             }
-            
+
             if (-not $global:Cfg.PSObject.Properties['CookiesPath']) {
                 $global:Cfg | Add-Member -NotePropertyName "CookiesPath" -NotePropertyValue $cookiePath
             } else {
                 $global:Cfg.CookiesPath = $cookiePath
             }
             $global:Cfg | ConvertTo-Json | Set-Content $ConfigFile -Encoding UTF8
-            
+
             $authArgs = @("--cookies", $cookiePath)
         }
 
@@ -226,31 +226,36 @@ do {
         Write-Host "  [4] $('Video Fragment (by timecode)')" -ForegroundColor White
         Write-Host "  [5] $('Audio Fragment (by timecode)')" -ForegroundColor White
         Write-Host "  [0] $('Back to previous menu')" -ForegroundColor Red
-        
+
         $contentChoice = Read-Host "  Choice"
         if ($contentChoice -eq '0') { continue }
-        if ($contentChoice -notmatch '^[1-5]$') { 
+        if ($contentChoice -notmatch '^[1-5]$') {
             Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red
             Start-Sleep 1
-            continue 
+            continue
         }
 
         Write-Host "`n  $('Enter URL:')" -ForegroundColor White
         $url = Read-Host "  > "
-        
+
         $downloadArgs = @()
         $statusMsg = "Downloading..."
-        
+
+        # Папка загрузки под вид операции: ...\downloaded
+        $dlDir = Join-Path $ScriptDir "downloaded"
+        if (-not (Test-Path $dlDir)) { New-Item -ItemType Directory -Path $dlDir -Force | Out-Null }
+        $commonArgs = @("-P", $dlDir, "--restrict-filenames")
+
         switch ($contentChoice) {
-            '1' { 
+            '1' {
                 $formatString = Select-VideoQuality -Url $url -AuthArgs $authArgs
-                $downloadArgs = @("-f", $formatString, "--merge-output-format", "mp4", $url) 
+                $downloadArgs = @("-f", $formatString, "--merge-output-format", "mp4", $url)
             }
-            '2' { 
-                $downloadArgs = @("-x", "--audio-format", "mp3", $url) 
+            '2' {
+                $downloadArgs = @("-x", "--audio-format", "mp3", $url)
             }
-            '3' { 
-                $downloadArgs = @("--yes-playlist", $url) 
+            '3' {
+                $downloadArgs = @("--yes-playlist", $url)
             }
             '4' {
                 $formatString = Select-VideoQuality -Url $url -AuthArgs $authArgs
@@ -258,7 +263,7 @@ do {
                 $start = (Read-Host "  > ").Trim().Replace(" ", ":")
                 Write-Host "  $('End time (e.g., 1:30 or 1 30):')" -ForegroundColor White
                 $end = (Read-Host "  > ").Trim().Replace(" ", ":")
-                
+
                 $section = "*$start-$end"
                 $downloadArgs = @("--download-sections", $section, "-f", $formatString, "--merge-output-format", "mp4", "--force-keyframes-at-cuts", $url)
                 $statusMsg = "Downloading fragment..."
@@ -268,17 +273,17 @@ do {
                 $start = (Read-Host "  > ").Trim().Replace(" ", ":")
                 Write-Host "  $('End time (e.g., 1:30 or 1 30):')" -ForegroundColor White
                 $end = (Read-Host "  > ").Trim().Replace(" ", ":")
-                
+
                 $section = "*$start-$end"
                 $downloadArgs = @("-x", "--audio-format", "mp3", "--download-sections", $section, $url)
                 $statusMsg = "Downloading audio fragment..."
             }
         }
-        
+
         Write-Host "`n  $statusMsg" -ForegroundColor Yellow
         Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
-        
-        $finalArgs = $authArgs + $downloadArgs + @("--no-colors")
+
+        $finalArgs = $authArgs + $commonArgs + $downloadArgs + @("--no-colors")
         $hasError = $false
 
         & $ytdlpCmd @finalArgs 2>&1 | ForEach-Object {
@@ -307,14 +312,14 @@ do {
         }
 
         Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
-        
-        if ($LASTEXITCODE -eq 0 -and -not $hasError) { 
-            Write-Host "  [OK] $('Done')" -ForegroundColor Green 
+
+        if ($LASTEXITCODE -eq 0 -and -not $hasError) {
+            Write-Host "  [OK] $('Done')" -ForegroundColor Green
         }
-        else { 
-            Write-Host "  [X] $('Error. Try using Cookies or clearing cache.')" -ForegroundColor Red 
+        else {
+            Write-Host "  [X] $('Error. Try using Cookies or clearing cache.')" -ForegroundColor Red
         }
-        
+
         Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
         Read-Host
     }
