@@ -6,10 +6,18 @@ $global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | Conver
 # --- Логирование ошибок и зависаний (в корневую папку скрипта) ---
 $script:ErrorLogFile = Join-Path $ScriptDir "conversion_errors.log"
 $script:NoProgressTimeoutSec = 300   # секунд без прогресса => процесс считается зависшим
+# Значение можно переопределить в global_config.json: NoProgressTimeoutSec
+if ($null -ne $global:Cfg.NoProgressTimeoutSec) { $script:NoProgressTimeoutSec = [int]$global:Cfg.NoProgressTimeoutSec }
 
 function Write-ErrorLog {
     param([string]$Type, [string]$FileName, [string]$Details)
     try {
+        # Если лог-файл был удалён вручную — пересоздаём его с заголовком
+        if (-not (Test-Path $script:ErrorLogFile)) {
+            Set-Content -Path $script:ErrorLogFile -Value @(
+                "=== Conversion error log | Root folder: $ScriptDir | Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===", ""
+            ) -Encoding UTF8
+        }
         $entry = @(
             "======================================================================"
             "[$Type] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
@@ -28,6 +36,48 @@ function Get-FFmpegTail {
         try { return ((Get-Content $Path -Tail $Lines -ErrorAction SilentlyContinue) -join "`n") } catch {}
     }
     return "(no output captured)"
+}
+
+# --- Лог по нажатию клавиши во время процесса ---
+# Проверяет, была ли нажата клавиша "L" (без блокировки цикла). Возвращает $true, если нажата.
+function Test-LoggingHotkey {
+    try {
+        while ([Console]::KeyAvailable) {
+            $k = [Console]::ReadKey($true)
+            if ($k.Key -eq 'L' -or $k.KeyChar -eq 'l' -or $k.KeyChar -eq 'L') { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+# Создаёт запись в корневом логе с текущим состоянием процесса и снимком вывода ffmpeg (по нажатию клавиши L)
+function Write-ProgressLog {
+    param(
+        [string]$FileName,   # обрабатываемый файл
+        [string]$Stage,      # Convert
+        [double]$ElapsedSec, # сколько секунд идёт процесс
+        [string]$LogFile,    # временный лог ffmpeg (для хвоста и сохранения копии)
+        [string]$OutPath     # путь к результату
+    )
+    $elapsedStr = [TimeSpan]::FromSeconds($ElapsedSec).ToString('hh\:mm\:ss')
+    $details = @(
+        "Manual log request (key 'L' pressed)"
+        "Stage: $Stage | Elapsed: $elapsedStr"
+        "Output: $OutPath"
+    ) -join [Environment]::NewLine
+    $savedLog = $null
+    if (Test-Path $LogFile) {
+        try {
+            $safeName = ((Split-Path -Leaf $FileName) -replace '[^\w\.\-]', '_')
+            $savedLog = Join-Path $ScriptDir ("ffmpeg_manual_{0}.log" -f $safeName)
+            Copy-Item -Path $LogFile -Destination $savedLog -Force
+        } catch { $savedLog = $null }
+    }
+    if ($savedLog) { $details += [Environment]::NewLine + "Full FFmpeg log snapshot saved to: $savedLog" }
+    $details += [Environment]::NewLine + "Last FFmpeg output:" + [Environment]::NewLine + (Get-FFmpegTail -Path $LogFile)
+    $ok = $false
+    try { Write-ErrorLog -Type "MANUAL" -FileName $FileName -Details $details; $ok = $true } catch {}
+    return [pscustomobject]@{ Success = $ok; LogFile = $script:ErrorLogFile; Snapshot = $savedLog }
 }
 
 function Show-Banner {
@@ -241,16 +291,30 @@ do {
     if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
     $outPath = Join-Path $outDir "$baseName`_converted.$($target.Ext)"
 
-    Write-Host "`n  $('Converting...')" -ForegroundColor Yellow
+    Write-Host "`n  $('Converting...') ($('Press L to write log'))" -ForegroundColor Yellow
     $ffmpegArgs = @("-i", $inputFile) + $target.Args + @("-y", $outPath)
     $logFile = Join-Path $env:TEMP "ffmpeg_conv.txt"
 
+    # Пишем в корневой лог начало каждого прогона (INFO) — ошибки ищутся по метке [ERROR]/[HANG]
+    Write-ErrorLog -Type "INFO" -FileName $inputFile -Details "Conversion started | Target: $fileType/$($target.Ext) | Output: $outPath"
+
+    try {
     # Запуск без -Wait с контролем зависания (отсутствие прогресса => остановка и запись в лог)
     $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $ffmpegArgs -NoNewWindow -PassThru -RedirectStandardError $logFile
+    if (-not $proc) { throw "Failed to start FFmpeg process (ffmpeg not found or access denied)" }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $lastLogSize = 0; $lastOutSize = 0; $lastProgressAt = $sw.Elapsed
     $hung = $false
     while (-not $proc.HasExited) {
+        # Лог по нажатию клавиши: [L] — записать текущее состояние процесса в корневой лог
+        if (Test-LoggingHotkey) {
+            $res = Write-ProgressLog -FileName $inputFile -Stage "Convert" -ElapsedSec $sw.Elapsed.TotalSeconds -LogFile $logFile -OutPath $outPath
+            if ($res.Success) {
+                Write-Host "`n  [LOG] $('State written to log'): $($res.LogFile)" -ForegroundColor Magenta
+            } else {
+                Write-Host "`n  [X] $('Failed to write log')" -ForegroundColor Red
+            }
+        }
         $logSize = 0; $outSize = 0
         try { if (Test-Path $logFile) { $logSize = (Get-Item $logFile).Length } } catch {}
         try { if (Test-Path $outPath) { $outSize = (Get-Item $outPath).Length } } catch {}
@@ -268,9 +332,17 @@ do {
     $sw.Stop()
 
     if ($hung) {
+        $rootFFLog = $null
+        if (Test-Path $logFile) {
+            try {
+                $rootFFLog = Join-Path $ScriptDir ("ffmpeg_hang_{0}.log" -f ($baseName -replace '[^\w\.\-]', '_'))
+                Copy-Item $logFile $rootFFLog -Force
+            } catch { $rootFFLog = $null }
+        }
         Write-ErrorLog -Type "HANG" -FileName $inputFile -Details (
             "Output: $outPath`n" +
             "Elapsed: $($sw.Elapsed.ToString('hh\:mm\:ss'))`n" +
+            $(if ($rootFFLog) { "Full FFmpeg log saved to: $rootFFLog`n" } else { "" }) +
             "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
         )
         Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
@@ -279,9 +351,17 @@ do {
         Write-Host "  [OK] $('Saved'): $outPath" -ForegroundColor Green
     } else {
         Write-Host "  [X] $('Conversion failed')" -ForegroundColor Red
+        $rootFFLog = $null
+        if (Test-Path $logFile) {
+            try {
+                $rootFFLog = Join-Path $ScriptDir ("ffmpeg_error_{0}.log" -f ($baseName -replace '[^\w\.\-]', '_'))
+                Copy-Item $logFile $rootFFLog -Force
+            } catch { $rootFFLog = $null }
+        }
         Write-ErrorLog -Type "ERROR" -FileName $inputFile -Details (
             "ExitCode: $($proc.ExitCode)`n" +
             "Output: $outPath`n" +
+            $(if ($rootFFLog) { "Full FFmpeg log saved to: $rootFFLog`n" } else { "" }) +
             "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
         )
         Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
@@ -289,6 +369,15 @@ do {
             if (-not (Test-Path $global:Cfg.LogsFolder)) { New-Item -ItemType Directory -Path $global:Cfg.LogsFolder | Out-Null }
             Copy-Item $logFile (Join-Path $global:Cfg.LogsFolder "$baseName`_conv.log") -Force
         }
+    }
+    } catch {
+        # Любая непредвиденная ошибка во время конвертации — в корневой лог
+        Write-ErrorLog -Type "ERROR" -FileName $(if ($inputFile) { $inputFile } else { "(unknown)" }) -Details (
+            "Stage: Unexpected error during conversion`n" +
+            "Message: $($_.Exception.Message)`n" +
+            "Line: $($_.InvocationInfo.ScriptLineNumber) | $($_.InvocationInfo.Line.Trim())"
+        )
+        Write-Host "  [X] $('Unexpected error, logged to'): $script:ErrorLogFile" -ForegroundColor Red
     }
 
     Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray

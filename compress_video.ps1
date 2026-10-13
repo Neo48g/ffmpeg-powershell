@@ -94,27 +94,39 @@ function Show-PresetsMenu {
 }
 
 # --- Логирование ошибок и зависаний ---
+# Файл лога ошибок создаётся в корневой папке скрипта (рядом с compress_video.ps1)
 $script:ErrorLogFile = Join-Path $ScriptDir "compression_errors.log"
-$script:NoProgressTimeoutSec = 60   # секунд без прогресса => процесс считается зависшим
-# $script:MaxRuntimeSec = 7200         максимальное время обработки одного файла
+$script:NoProgressTimeoutSec = 60     # секунд без прогресса => процесс считается зависшим
+$script:MaxRuntimeSec = 7200          # максимальное время обработки одного файла (сек)
+# Значения можно переопределить в global_config.json: NoProgressTimeoutSec / MaxRuntimeSec
+if ($null -ne $global:Cfg.NoProgressTimeoutSec) { $script:NoProgressTimeoutSec = [int]$global:Cfg.NoProgressTimeoutSec }
+if ($null -ne $global:Cfg.MaxRuntimeSec)        { $script:MaxRuntimeSec = [int]$global:Cfg.MaxRuntimeSec }
 
 function Write-ErrorLog {
     param(
-        [string]$Type,        # ERROR | HANG
+        [string]$Type,        # ERROR | HANG | INFO
         [string]$FileName,
         [string]$Details
     )
     try {
+        # Если лог-файл был удалён вручную — пересоздаём его с заголовком
+        if (-not (Test-Path $script:ErrorLogFile)) {
+            Set-Content -Path $script:ErrorLogFile -Value @(
+                "=== Compression error log | Root folder: $ScriptDir | Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===", ""
+            ) -Encoding UTF8
+        }
         $entry = @(
             "======================================================================"
             "[$Type] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             "File: $FileName"
+            "Settings: HW=$script:hwDevice | Codec=$script:codec | CRF=$script:crfValue | VMAF=$(if($script:enableVMAF){'ON'}else{'OFF'}) | Recursive=$(if($script:enableRecursiveSearch){'ON'}else{'OFF'})"
             "Details:"
             $Details
             ""
         ) -join [Environment]::NewLine
         Add-Content -Path $script:ErrorLogFile -Value $entry -Encoding UTF8
-    } catch {}
+        return $true
+    } catch { return $false }
 }
 
 function Get-FFmpegTail {
@@ -123,6 +135,60 @@ function Get-FFmpegTail {
         try { return ((Get-Content $Path -Tail $Lines -ErrorAction SilentlyContinue) -join "`n") } catch {}
     }
     return "(no output captured)"
+}
+
+# Сохраняет полный вывод ffmpeg в корневую папку рядом со скриптом (для разбора проблемы)
+function Save-FFmpegLogToRoot {
+    param([string]$SourceLog, [string]$Stage, [string]$SrcName)
+    try {
+        if (-not (Test-Path $SourceLog)) { return $null }
+        $safeName = ($SrcName -replace '[^\w\.\-]', '_')
+        $dest = Join-Path $ScriptDir ("ffmpeg_{0}_{1}.log" -f $Stage, $safeName)
+        Copy-Item -Path $SourceLog -Destination $dest -Force
+        return $dest
+    } catch { return $null }
+}
+
+# --- Лог по нажатию клавиши во время процесса сжатия ---
+$script:LastProgressInfo = @{ CurrentTime = 0.0; Percent = 0.0 }  # обновляется циклом прогресса
+
+# Проверяет, была ли нажата клавиша "L" (без блокировки цикла). Возвращает $true, если нажата.
+function Test-LoggingHotkey {
+    try {
+        while ([Console]::KeyAvailable) {
+            $k = [Console]::ReadKey($true)
+            if ($k.Key -eq 'L' -or $k.KeyChar -eq 'l' -or $k.KeyChar -eq 'L') { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+# Создаёт запись в корневом логе ошибок с текущим состоянием процесса (по нажатию клавиши L)
+function Write-ProgressLog {
+    param(
+        [string]$FileName,       # обрабатываемый файл
+        [string]$Stage,          # Compress / VMAF
+        [int]$Iteration,         # номер итерации сжатия
+        [int]$CurrentCRF,        # текущий CRF
+        [double]$ElapsedSec,     # сколько секунд идёт процесс
+        [string]$LogFile,        # временный лог ffmpeg (для хвоста и сохранения копии)
+        [int]$FileCount,         # всего файлов в очереди
+        [int]$Index              # номер текущего файла
+    )
+    $info = $script:LastProgressInfo
+    $elapsedStr = [TimeSpan]::FromSeconds($ElapsedSec).ToString('hh\:mm\:ss')
+    $details = @(
+        "Manual log request (key 'L' pressed)"
+        "Stage: $Stage | File $Index/$FileCount | Iteration: $Iteration"
+        "Progress: $([math]::Round($info.Percent, 1))% | FFmpeg time: $([math]::Round($info.CurrentTime, 1)) s | Elapsed: $elapsedStr"
+    ) -join [Environment]::NewLine
+    $savedLog = Save-FFmpegLogToRoot -SourceLog $LogFile -Stage "manual" -SrcName $FileName
+    if ($savedLog) {
+        $details += [Environment]::NewLine + "Full FFmpeg log snapshot saved to: $savedLog"
+    }
+    $details += [Environment]::NewLine + "Last FFmpeg output:" + [Environment]::NewLine + (Get-FFmpegTail -Path $LogFile)
+    $ok = Write-ErrorLog -Type "MANUAL" -FileName $FileName -Details $details
+    return [pscustomobject]@{ Success = $ok; LogFile = $script:ErrorLogFile; Snapshot = $savedLog }
 }
 
 # --- Вспомогательные функции основных настроек ---
@@ -169,6 +235,7 @@ Load-Presets
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [0] $('START COMPRESSION')" -ForegroundColor Green
     Write-Host "  [9] $('Back to Hub')" -ForegroundColor Red
+    Write-Host "  $('Tip'): Press L during compression to write a log entry" -ForegroundColor DarkGray
 
     $c = Read-Host "  Choice"
     switch ($c) {
@@ -211,6 +278,10 @@ Load-Presets
                 return Join-Path $outDir "$($SrcFile.BaseName)_compressed.mp4"
             }
 
+            # Пишем в корневой лог начало каждого прогона сжатия (INFO) — ошибки ищутся по метке [ERROR]/[HANG]
+            Write-ErrorLog -Type "INFO" -FileName "$($files.Count) file(s)" -Details "Run started | Output: <srcDir>\compressed\*_compressed.mp4" | Out-Null
+
+            try {
             $i = 1; foreach ($f in $files) {
                 $outFile = Get-CompressedOutFile -SrcFile $f
                 Write-Host "`n  [$i/$($files.Count)] $($f.Name)" -ForegroundColor Yellow
@@ -220,7 +291,9 @@ Load-Presets
                 try {
                     $durStr = & ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$($f.FullName)" 2>$null
                     if ($durStr) { $duration = [double]$durStr }
-                } catch {}
+                } catch {
+                    Write-ErrorLog -Type "ERROR" -FileName $f.FullName -Details "Stage: ffprobe duration check failed`n$($_.Exception.Message)" | Out-Null
+                }
 
                                 $currentCRF = $script:crfValue; $iteration = 0; $needsRecompress = $true
                 while ($needsRecompress) {
@@ -255,10 +328,26 @@ Load-Presets
                         if ($duration -gt 0) { $percent = [math]::Min(100, ($currentTime / $duration) * 100) }
 
                         $elapsed = $sw.Elapsed.ToString('hh\:mm\:ss')
-                        $status = "$('Time'): $elapsed"
+                        $status = "$('Time'): $elapsed | $('Press L to write log')"
                         if ($duration -gt 0) { $status += " | $('Progress'): $([math]::Round($percent, 1))%" }
 
                         Write-Progress -Activity "$('Compressing'): $($f.Name)" -Status $status -PercentComplete $percent -Id 1
+
+                        # Запоминаем текущий прогресс для записи лога по нажатию клавиши "L"
+                        $script:LastProgressInfo.CurrentTime = $currentTime
+                        $script:LastProgressInfo.Percent = $percent
+
+                        # Лог по нажатию клавиши: [L] — записать текущее состояние процесса в корневой лог
+                        if (Test-LoggingHotkey) {
+                            $res = Write-ProgressLog -FileName $f.FullName -Stage "Compress" -Iteration $iteration `
+                                -CurrentCRF $currentCRF -ElapsedSec $sw.Elapsed.TotalSeconds -LogFile $logFile `
+                                -FileCount $files.Count -Index $i
+                            if ($res.Success) {
+                                Write-Host "`n  [LOG] $('State written to log'): $($res.LogFile)" -ForegroundColor Magenta
+                            } else {
+                                Write-Host "`n  [X] $('Failed to write log')" -ForegroundColor Red
+                            }
+                        }
 
                         # Признак жизни: рост time= в выводе ffmpeg или размера файла лога/результата
                         $logSize = 0
@@ -286,9 +375,11 @@ Load-Presets
                     Write-Progress -Activity "$('Compressing'): $($f.Name)" -Completed -Id 1
 
                     if ($hung) {
+                        $savedLog = Save-FFmpegLogToRoot -SourceLog $logFile -Stage "hang" -SrcName $f.Name
                         Write-ErrorLog -Type "HANG" -FileName $f.FullName -Details (
                             "CRF: $currentCRF | Encoder: $script:hwDevice/$script:codec`n" +
                             "Elapsed: $($sw.Elapsed.ToString('hh\:mm\:ss'))`n" +
+                            $(if ($savedLog) { "Full FFmpeg log saved to: $savedLog`n" } else { "" }) +
                             "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
                         )
                         Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
@@ -300,9 +391,11 @@ Load-Presets
                     $compressOK = (Test-Path $outFile) -and ((Get-Item $outFile -ErrorAction SilentlyContinue).Length -gt 0)
                     if (-not $compressOK) {
                         Write-Host "  [X] $('FFmpeg Error')" -ForegroundColor Red
+                        $savedLog = Save-FFmpegLogToRoot -SourceLog $logFile -Stage "error" -SrcName $f.Name
                         Write-ErrorLog -Type "ERROR" -FileName $f.FullName -Details (
                             "Command: ffmpeg $args`n" +
                             "ExitCode: $(try { $proc.ExitCode } catch { 'n/a' })`n" +
+                            $(if ($savedLog) { "Full FFmpeg log saved to: $savedLog`n" } else { "" }) +
                             "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
                         )
                         Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
@@ -337,8 +430,24 @@ Load-Presets
                             $vmafPercent = 0
                             if ($duration -gt 0) { $vmafPercent = [math]::Min(100, ($vmafTime / $duration) * 100) }
                             $vmafElapsed = $vmafSw.Elapsed.ToString('hh\:mm\:ss')
-                            $vmafStatus = "$('Time'): $vmafElapsed | $('Progress'): $([math]::Round($vmafPercent, 1))%"
+                            $vmafStatus = "$('Time'): $vmafElapsed | $('Progress'): $([math]::Round($vmafPercent, 1))% | $('Press L to write log')"
                             Write-Progress -Activity "$('Calculating VMAF'): $($f.Name)" -Status $vmafStatus -PercentComplete $vmafPercent -Id 2
+
+                            # Запоминаем текущий прогресс для записи лога по нажатию клавиши "L"
+                            $script:LastProgressInfo.CurrentTime = $vmafTime
+                            $script:LastProgressInfo.Percent = $vmafPercent
+
+                            # Лог по нажатию клавиши: [L] — записать текущее состояние процесса VMAF в корневой лог
+                            if (Test-LoggingHotkey) {
+                                $res = Write-ProgressLog -FileName $f.FullName -Stage "VMAF" -Iteration $iteration `
+                                    -CurrentCRF $currentCRF -ElapsedSec $vmafSw.Elapsed.TotalSeconds -LogFile $vmafLog `
+                                    -FileCount $files.Count -Index $i
+                                if ($res.Success) {
+                                    Write-Host "`n  [LOG] $('State written to log'): $($res.LogFile)" -ForegroundColor Magenta
+                                } else {
+                                    Write-Host "`n  [X] $('Failed to write log')" -ForegroundColor Red
+                                }
+                            }
 
                             $vmafLogSize = 0
                             try { if (Test-Path $vmafLog) { $vmafLogSize = (Get-Item $vmafLog).Length } } catch {}
@@ -358,10 +467,12 @@ Load-Presets
                         Write-Progress -Activity "$('Calculating VMAF'): $($f.Name)" -Completed -Id 2
 
                         if ($vmafHung) {
+                            $savedLog = Save-FFmpegLogToRoot -SourceLog $vmafLog -Stage "vmaf_hang" -SrcName $f.Name
                             Write-ErrorLog -Type "HANG" -FileName $f.FullName -Details (
                                 "Stage: VMAF calculation`n" +
                                 "CRF: $currentCRF | Encoder: $script:hwDevice/$script:codec`n" +
                                 "Elapsed: $($vmafSw.Elapsed.ToString('hh\:mm\:ss'))`n" +
+                                $(if ($savedLog) { "Full FFmpeg log saved to: $savedLog`n" } else { "" }) +
                                 "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $vmafLog)
                             )
                             Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
@@ -375,8 +486,10 @@ Load-Presets
                             if ($logContent -match 'VMAF score:\s*([\d\.]+)') { $vmafScore = [math]::Round([double]$matches[1], 2) }
                             elseif ($logContent -match '"vmaf":\s*([\d\.]+)') { $vmafScore = [math]::Round([double]$matches[1], 2) }
                             else {
+                                $savedLog = Save-FFmpegLogToRoot -SourceLog $vmafLog -Stage "vmaf_parse_error" -SrcName $f.Name
                                 Write-ErrorLog -Type "ERROR" -FileName $f.FullName -Details (
                                     "Stage: VMAF score not found in output`n" +
+                                    $(if ($savedLog) { "Full FFmpeg log saved to: $savedLog`n" } else { "" }) +
                                     "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $vmafLog)
                                 )
                                 Write-Host "  [X] $('VMAF parse error, logged'): $script:ErrorLogFile" -ForegroundColor DarkGray
@@ -396,6 +509,15 @@ Load-Presets
 
                 if (Test-Path $outFile) { Write-Host "  [OK] $('Saved')" -ForegroundColor Green }
                 $i++
+            }
+            } catch {
+                # Любая непредвиденная ошибка во время процесса сжатия — в корневой лог
+                Write-ErrorLog -Type "ERROR" -FileName $(if ($f) { $f.FullName } else { "(unknown)" }) -Details (
+                    "Stage: Unexpected error during compression loop`n" +
+                    "Message: $($_.Exception.Message)`n" +
+                    "Line: $($_.InvocationInfo.ScriptLineNumber) | $($_.InvocationInfo.Line.Trim())"
+                ) | Out-Null
+                Write-Host "  [X] $('Unexpected error, logged to'): $script:ErrorLogFile" -ForegroundColor Red
             }
             Write-Host "`n  [OK] $('Done! Press Enter to return.')" -ForegroundColor Green
             Read-Host

@@ -13,6 +13,66 @@ if (Test-Path $ToolsDir) {
 $global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{} }
 function Show-Banner { param([string]$Title) Clear-Host; Write-Host "`n========================================================" -ForegroundColor Cyan; Write-Host "  $Title" -ForegroundColor Yellow; Write-Host "========================================================`n" -ForegroundColor Cyan }
 
+# --- Логирование ошибок (в корневую папку скрипта) ---
+$script:ErrorLogFile = Join-Path $ScriptDir "download_errors.log"
+
+function Write-ErrorLog {
+    param(
+        [string]$Type,        # ERROR | INFO
+        [string]$FileName,
+        [string]$Details
+    )
+    try {
+        # Если лог-файл был удалён вручную — пересоздаём его с заголовком
+        if (-not (Test-Path $script:ErrorLogFile)) {
+            Set-Content -Path $script:ErrorLogFile -Value @(
+                "=== Download error log | Root folder: $ScriptDir | Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===", ""
+            ) -Encoding UTF8
+        }
+        $entry = @(
+            "======================================================================"
+            "[$Type] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            "Target: $FileName"
+            "Details:"
+            $Details
+            ""
+        ) -join [Environment]::NewLine
+        Add-Content -Path $script:ErrorLogFile -Value $entry -Encoding UTF8
+        return $true
+    } catch { return $false }
+}
+
+# --- Лог по нажатию клавиши во время процесса загрузки ---
+# Проверяет, была ли нажата клавиша "L" (без блокировки). Возвращает $true, если нажата.
+function Test-LoggingHotkey {
+    try {
+        while ([Console]::KeyAvailable) {
+            $k = [Console]::ReadKey($true)
+            if ($k.Key -eq 'L' -or $k.KeyChar -eq 'l' -or $k.KeyChar -eq 'L') { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+# Создаёт запись в корневом логе с текущим состоянием загрузки (по нажатию клавиши L)
+function Write-ProgressLog {
+    param(
+        [string]$Target,      # URL / цель загрузки
+        [double]$ElapsedSec,  # сколько секунд идёт загрузка
+        [array]$Output        # собранный вывод yt-dlp
+    )
+    $elapsedStr = [TimeSpan]::FromSeconds($ElapsedSec).ToString('hh\:mm\:ss')
+    $tail = @($Output | Select-Object -Last 40)
+    $details = @(
+        "Manual log request (key 'L' pressed)"
+        "Stage: Download | Elapsed: $elapsedStr | Lines captured: $(@($Output).Count)"
+        "Last yt-dlp output:"
+    ) -join [Environment]::NewLine
+    $details += [Environment]::NewLine + ($tail -join [Environment]::NewLine)
+    $ok = Write-ErrorLog -Type "MANUAL" -FileName $Target -Details $details
+    return [pscustomobject]@{ Success = $ok; LogFile = $script:ErrorLogFile }
+}
+
 # --- Обнаружение инструмента ---
 $ytdlpExe = Join-Path $ToolsDir "yt-dlp.exe"
 $ytdlpCmd = if (Test-Path $ytdlpExe) { $ytdlpExe } else { "yt-dlp" }
@@ -282,13 +342,31 @@ do {
 
         Write-Host "`n  $statusMsg" -ForegroundColor Yellow
         Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
+        Write-Host "  $('Tip'): Press L during download to write a log entry" -ForegroundColor DarkGray
+
+        # Пишем в корневой лог начало каждой загрузки (INFO) — ошибки ищутся по метке [ERROR]
+        Write-ErrorLog -Type "INFO" -FileName $url -Details "Download started | ContentChoice: $contentChoice | Output folder: $dlDir" | Out-Null
 
         $finalArgs = $authArgs + $commonArgs + $downloadArgs + @("--no-colors")
         $hasError = $false
+        $dlOutput = @()
+        $dlSw = [System.Diagnostics.Stopwatch]::StartNew()
 
+        try {
         & $ytdlpCmd @finalArgs 2>&1 | ForEach-Object {
             $line = $_.ToString()
+            $dlOutput += $line
             if ([string]::IsNullOrWhiteSpace($line)) { return }
+
+            # Лог по нажатию клавиши: [L] — записать текущее состояние загрузки в корневой лог
+            if (Test-LoggingHotkey) {
+                $res = Write-ProgressLog -Target $url -ElapsedSec $dlSw.Elapsed.TotalSeconds -Output $dlOutput
+                if ($res.Success) {
+                    Write-Host "  [LOG] $('State written to log'): $($res.LogFile)" -ForegroundColor Magenta
+                } else {
+                    Write-Host "  [X] $('Failed to write log')" -ForegroundColor Red
+                }
+            }
 
             if ($line -match '^\[download\]|\d+\.\d+%') {
                 Write-Host $line -ForegroundColor Cyan
@@ -310,6 +388,12 @@ do {
                 Write-Host $line -ForegroundColor White
             }
         }
+        } catch {
+            # Непредвиденная ошибка во время загрузки — в корневой лог
+            $hasError = $true
+            $dlOutput += "Unexpected error: $($_.Exception.Message)"
+            Write-Host "  [X] $('Unexpected error during download')" -ForegroundColor Red
+        }
 
         Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
 
@@ -318,6 +402,12 @@ do {
         }
         else {
             Write-Host "  [X] $('Error. Try using Cookies or clearing cache.')" -ForegroundColor Red
+            Write-ErrorLog -Type "ERROR" -FileName $url -Details (
+                "Stage: Download failed | ContentChoice: $contentChoice | ExitCode: $LASTEXITCODE`n" +
+                "Command: $ytdlpCmd $($finalArgs -join ' ')`n" +
+                "Last yt-dlp output:`n" + (($dlOutput | Select-Object -Last 40) -join "`n")
+            )
+            Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
         }
 
         Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
