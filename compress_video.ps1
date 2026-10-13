@@ -43,7 +43,7 @@ function Show-PresetsMenu {
         Write-Host "  [2] $('Load preset')" -ForegroundColor White
         Write-Host "  [3] $('Delete preset')" -ForegroundColor White
         Write-Host "`n  [0] $('Back')" -ForegroundColor Red
-        
+
         $c = Read-Host "  Choice"
         switch ($c) {
             '1' {
@@ -88,6 +88,38 @@ function Show-PresetsMenu {
     } while ($true)
 }
 
+# --- Логирование ошибок и зависаний ---
+$script:ErrorLogFile = Join-Path $ScriptDir "compression_errors.log"
+$script:NoProgressTimeoutSec = 300   # секунд без прогресса => процесс считается зависшим
+$script:MaxRuntimeSec = 7200         # максимальное время обработки одного файла
+
+function Write-ErrorLog {
+    param(
+        [string]$Type,        # ERROR | HANG
+        [string]$FileName,
+        [string]$Details
+    )
+    try {
+        $entry = @(
+            "======================================================================"
+            "[$Type] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            "File: $FileName"
+            "Details:"
+            $Details
+            ""
+        ) -join [Environment]::NewLine
+        Add-Content -Path $script:ErrorLogFile -Value $entry -Encoding UTF8
+    } catch {}
+}
+
+function Get-FFmpegTail {
+    param([string]$Path, [int]$Lines = 40)
+    if (Test-Path $Path) {
+        try { return ((Get-Content $Path -Tail $Lines -ErrorAction SilentlyContinue) -join "`n") } catch {}
+    }
+    return "(no output captured)"
+}
+
 # --- Вспомогательные функции основных настроек ---
 function Get-Files {
     Get-ChildItem -Path $script:inputFolder -File -Recurse:$script:enableRecursiveSearch -ErrorAction SilentlyContinue | Where-Object {
@@ -105,7 +137,7 @@ function Build-FFmpegArgs {
         $enc = switch ($script:codec) { "h264" {"libx264"} "h265" {"libx265"} "av1" {"libsvtav1"} default {"libx264"} }
         $vArgs = "-c:v $enc -crf $Quality -preset medium"
     } else {
-        $enc = switch ($script:hwDevice) { 
+        $enc = switch ($script:hwDevice) {
             "NVIDIA" { switch ($script:codec) { "h264" {"h264_nvenc"} "h265" {"hevc_nvenc"} "av1" {"av1_nvenc"} } }
             "AMD"    { switch ($script:codec) { "h264" {"h264_amf"} "h265" {"hevc_amf"} "av1" {"av1_amf"} } }
             "Intel"  { switch ($script:codec) { "h264" {"h264_qsv"} "h265" {"hevc_qsv"} "av1" {"av1_qsv"} } }
@@ -132,7 +164,7 @@ Load-Presets
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [0] $('START COMPRESSION')" -ForegroundColor Green
     Write-Host "  [9] $('Back to Hub')" -ForegroundColor Red
-    
+
     $c = Read-Host "  Choice"
     switch ($c) {
         '1' {
@@ -167,11 +199,11 @@ Load-Presets
             if ($files.Count -eq 0) { Write-Host "`n  [X] $('No files found')" -ForegroundColor Red; Start-Sleep 2; continue }
             $outDir = Join-Path $script:inputFolder "compressed"
             if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
-            
+
             $i = 1; foreach ($f in $files) {
                 $outFile = Join-Path $outDir "$($f.BaseName)_compressed.mp4"
                 Write-Host "`n  [$i/$($files.Count)] $($f.Name)" -ForegroundColor Yellow
-                
+
                 # Получаем длительность для индикатора выполнения
                 $duration = 0
                 try {
@@ -185,13 +217,16 @@ Load-Presets
                     $vArgs = Build-FFmpegArgs -Quality $currentCRF
                     $args = "-hide_banner -loglevel info -i `"$($f.FullName)`" $vArgs -c:a aac -b:a 128k -y `"$outFile`""
                     $logFile = Join-Path $env:TEMP "ffmpeg_comp.txt"
-                    
+
                     # Удаляем старый файл перед запуском, чтобы проверка была корректной
                     if (Test-Path $outFile) { Remove-Item $outFile -Force -ErrorAction SilentlyContinue }
-                    
+
                     $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $args -RedirectStandardError $logFile -PassThru -NoNewWindow
                     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
+                    # --- Анти-зависание: отслеживаем прогресс и время работы ---
+                    $lastTime = -1.0; $lastLogSize = 0; $lastOutSize = 0; $lastProgressAt = $sw.Elapsed
+                    $hung = $false
                     while (-not $proc.HasExited) {
                         $currentTime = 0
                         if (Test-Path $logFile) {
@@ -204,37 +239,78 @@ Load-Presets
                                 }
                             } catch {}
                         }
-                        
+
                         $percent = 0
                         if ($duration -gt 0) { $percent = [math]::Min(100, ($currentTime / $duration) * 100) }
-                        
+
                         $elapsed = $sw.Elapsed.ToString('hh\:mm\:ss')
                         $status = "$('Time'): $elapsed"
                         if ($duration -gt 0) { $status += " | $('Progress'): $([math]::Round($percent, 1))%" }
-                        
+
                         Write-Progress -Activity "$('Compressing'): $($f.Name)" -Status $status -PercentComplete $percent -Id 1
+
+                        # Признак жизни: рост time= в выводе ffmpeg или размера файла лога/результата
+                        $logSize = 0
+                        try { if (Test-Path $logFile) { $logSize = (Get-Item $logFile).Length } } catch {}
+                        $outSize = 0
+                        try { if (Test-Path $outFile) { $outSize = (Get-Item $outFile).Length } } catch {}
+
+                        if ($currentTime -gt $lastTime -or $logSize -ne $lastLogSize -or $outSize -ne $lastOutSize) {
+                            $lastTime = $currentTime; $lastLogSize = $logSize; $lastOutSize = $outSize
+                            $lastProgressAt = $sw.Elapsed
+                        } elseif ($sw.Elapsed.TotalSeconds -gt $script:MaxRuntimeSec) {
+                            $hung = $true
+                            Write-Host "`n  [!] $('Process hung detected: max runtime exceeded'). $('Stopping FFmpeg...')" -ForegroundColor Red
+                            try { & taskkill /F /T /PID $proc.Id 2>$null | Out-Null; $proc.Kill() } catch {}
+                            break
+                        } elseif (($sw.Elapsed - $lastProgressAt).TotalSeconds -gt $script:NoProgressTimeoutSec) {
+                            $hung = $true
+                            Write-Host "`n  [!] $('Process hung detected: no progress for') $([int]$script:NoProgressTimeoutSec)$(' s'). $('Stopping FFmpeg...')" -ForegroundColor Red
+                            try { & taskkill /F /T /PID $proc.Id 2>$null | Out-Null; $proc.Kill() } catch {}
+                            break
+                        }
                         Start-Sleep -Milliseconds 500
                     }
                     $sw.Stop()
                     Write-Progress -Activity "$('Compressing'): $($f.Name)" -Completed -Id 1
-                    
+
+                    if ($hung) {
+                        Write-ErrorLog -Type "HANG" -FileName $f.FullName -Details (
+                            "CRF: $currentCRF | Encoder: $script:hwDevice/$script:codec`n" +
+                            "Elapsed: $($sw.Elapsed.ToString('hh\:mm\:ss'))`n" +
+                            "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
+                        )
+                        Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
+                        Remove-Item $outFile -Force -ErrorAction SilentlyContinue
+                        break
+                    }
+
                     # проверяем выходной файл, а не код завершения
                     $compressOK = (Test-Path $outFile) -and ((Get-Item $outFile -ErrorAction SilentlyContinue).Length -gt 0)
                     if (-not $compressOK) {
                         Write-Host "  [X] $('FFmpeg Error')" -ForegroundColor Red
+                        Write-ErrorLog -Type "ERROR" -FileName $f.FullName -Details (
+                            "Command: ffmpeg $args`n" +
+                            "ExitCode: $(try { $proc.ExitCode } catch { 'n/a' })`n" +
+                            "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
+                        )
+                        Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
                         break
                     }
-                    
+
                     # Логика VMAF и AutoCRF
                     $needsRecompress = $false
                     if ($script:enableVMAF -and $iteration -le $script:maxIterations) {
                         Write-Host "  -> $('Calculating VMAF...')" -ForegroundColor White
                         $vmafArgs = "-hide_banner -loglevel info -i `"$($f.FullName)`" -i `"$outFile`" -lavfi `"[0:v]scale=1920:1080,fps=30[ref];[1:v]scale=1920:1080,fps=30[dist];[ref][dist]libvmaf`" -f null -"
                         $vmafLog = Join-Path $env:TEMP "vmaf_log.txt"
-                        
+
                         $vmafProc = Start-Process -FilePath "ffmpeg" -ArgumentList $vmafArgs -RedirectStandardError $vmafLog -PassThru -NoNewWindow
                         $vmafSw = [System.Diagnostics.Stopwatch]::StartNew()
-                        
+
+                        # Анти-зависание для расчёта VMAF
+                        $vmafLastTime = -1.0; $vmafLastLogSize = 0; $vmafLastProgressAt = $vmafSw.Elapsed
+                        $vmafHung = $false
                         while (-not $vmafProc.HasExited) {
                             $vmafTime = 0
                             if (Test-Path $vmafLog) {
@@ -252,20 +328,52 @@ Load-Presets
                             $vmafElapsed = $vmafSw.Elapsed.ToString('hh\:mm\:ss')
                             $vmafStatus = "$('Time'): $vmafElapsed | $('Progress'): $([math]::Round($vmafPercent, 1))%"
                             Write-Progress -Activity "$('Calculating VMAF'): $($f.Name)" -Status $vmafStatus -PercentComplete $vmafPercent -Id 2
+
+                            $vmafLogSize = 0
+                            try { if (Test-Path $vmafLog) { $vmafLogSize = (Get-Item $vmafLog).Length } } catch {}
+
+                            if ($vmafTime -gt $vmafLastTime -or $vmafLogSize -ne $vmafLastLogSize) {
+                                $vmafLastTime = $vmafTime; $vmafLastLogSize = $vmafLogSize
+                                $vmafLastProgressAt = $vmafSw.Elapsed
+                            } elseif (($vmafSw.Elapsed - $vmafLastProgressAt).TotalSeconds -gt $script:NoProgressTimeoutSec) {
+                                $vmafHung = $true
+                                Write-Host "`n  [!] $('VMAF process hung detected'). $('Stopping FFmpeg...')" -ForegroundColor Red
+                                try { & taskkill /F /T /PID $vmafProc.Id 2>$null | Out-Null; $vmafProc.Kill() } catch {}
+                                break
+                            }
                             Start-Sleep -Milliseconds 500
                         }
                         $vmafSw.Stop()
                         Write-Progress -Activity "$('Calculating VMAF'): $($f.Name)" -Completed -Id 2
+
+                        if ($vmafHung) {
+                            Write-ErrorLog -Type "HANG" -FileName $f.FullName -Details (
+                                "Stage: VMAF calculation`n" +
+                                "CRF: $currentCRF | Encoder: $script:hwDevice/$script:codec`n" +
+                                "Elapsed: $($vmafSw.Elapsed.ToString('hh\:mm\:ss'))`n" +
+                                "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $vmafLog)
+                            )
+                            Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
+                            Remove-Item $vmafLog -Force -ErrorAction SilentlyContinue
+                            break
+                        }
 
                         $vmafScore = 0
                         if (Test-Path $vmafLog) {
                             $logContent = Get-Content $vmafLog -Raw -ErrorAction SilentlyContinue
                             if ($logContent -match 'VMAF score:\s*([\d\.]+)') { $vmafScore = [math]::Round([double]$matches[1], 2) }
                             elseif ($logContent -match '"vmaf":\s*([\d\.]+)') { $vmafScore = [math]::Round([double]$matches[1], 2) }
+                            else {
+                                Write-ErrorLog -Type "ERROR" -FileName $f.FullName -Details (
+                                    "Stage: VMAF score not found in output`n" +
+                                    "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $vmafLog)
+                                )
+                                Write-Host "  [X] $('VMAF parse error, logged'): $script:ErrorLogFile" -ForegroundColor DarkGray
+                            }
                             Remove-Item $vmafLog -Force -ErrorAction SilentlyContinue
                         }
                         Write-Host "  -> VMAF: $vmafScore" -ForegroundColor $(if ($vmafScore -ge $script:vmafThreshold) { "Green" } else { "Yellow" })
-                        
+
                         if ($script:enableAutoCRF -and $vmafScore -lt $script:vmafThreshold -and $currentCRF -gt $script:minCRF) {
                             $currentCRF -= 2
                             $needsRecompress = $true
@@ -274,7 +382,7 @@ Load-Presets
                         }
                     }
                 }
-                
+
                 if (Test-Path $outFile) { Write-Host "  [OK] $('Saved')" -ForegroundColor Green }
                 $i++
             }

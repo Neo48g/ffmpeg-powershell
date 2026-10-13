@@ -3,6 +3,33 @@ $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
 $global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$true; LogsFolder=(Join-Path $ScriptDir "logs")} }
 
+# --- Логирование ошибок и зависаний (в корневую папку скрипта) ---
+$script:ErrorLogFile = Join-Path $ScriptDir "conversion_errors.log"
+$script:NoProgressTimeoutSec = 300   # секунд без прогресса => процесс считается зависшим
+
+function Write-ErrorLog {
+    param([string]$Type, [string]$FileName, [string]$Details)
+    try {
+        $entry = @(
+            "======================================================================"
+            "[$Type] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            "File: $FileName"
+            "Details:"
+            $Details
+            ""
+        ) -join [Environment]::NewLine
+        Add-Content -Path $script:ErrorLogFile -Value $entry -Encoding UTF8
+    } catch {}
+}
+
+function Get-FFmpegTail {
+    param([string]$Path, [int]$Lines = 40)
+    if (Test-Path $Path) {
+        try { return ((Get-Content $Path -Tail $Lines -ErrorAction SilentlyContinue) -join "`n") } catch {}
+    }
+    return "(no output captured)"
+}
+
 function Show-Banner {
     param([string]$Title)
     Clear-Host
@@ -173,7 +200,7 @@ do {
     Write-Host ("  Drag & drop file here, enter path, or '0' to return:") -ForegroundColor White
     $raw = Read-Host "  > "
     if ($raw -eq '0' -or [string]::IsNullOrWhiteSpace($raw)) { break }
-    
+
     $path = Get-CleanPath $raw
     $inputFile = Resolve-InputPath $path
     if (-not $inputFile) {
@@ -213,13 +240,47 @@ do {
     Write-Host "`n  $('Converting...')" -ForegroundColor Yellow
     $ffmpegArgs = @("-i", $inputFile) + $target.Args + @("-y", $outPath)
     $logFile = Join-Path $env:TEMP "ffmpeg_conv.txt"
-    
-    $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $ffmpegArgs -NoNewWindow -Wait -PassThru -RedirectStandardError $logFile
-    
-    if ($proc.ExitCode -eq 0) {
+
+    # Запуск без -Wait с контролем зависания (отсутствие прогресса => остановка и запись в лог)
+    $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $ffmpegArgs -NoNewWindow -PassThru -RedirectStandardError $logFile
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastLogSize = 0; $lastOutSize = 0; $lastProgressAt = $sw.Elapsed
+    $hung = $false
+    while (-not $proc.HasExited) {
+        $logSize = 0; $outSize = 0
+        try { if (Test-Path $logFile) { $logSize = (Get-Item $logFile).Length } } catch {}
+        try { if (Test-Path $outPath) { $outSize = (Get-Item $outPath).Length } } catch {}
+        if ($logSize -ne $lastLogSize -or $outSize -ne $lastOutSize) {
+            $lastLogSize = $logSize; $lastOutSize = $outSize
+            $lastProgressAt = $sw.Elapsed
+        } elseif (($sw.Elapsed - $lastProgressAt).TotalSeconds -gt $script:NoProgressTimeoutSec) {
+            $hung = $true
+            Write-Host "`n  [!] $('Process hung detected: no progress for') $([int]$script:NoProgressTimeoutSec)$(' s'). $('Stopping FFmpeg...')" -ForegroundColor Red
+            try { & taskkill /F /T /PID $proc.Id 2>$null | Out-Null; $proc.Kill() } catch {}
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    $sw.Stop()
+
+    if ($hung) {
+        Write-ErrorLog -Type "HANG" -FileName $inputFile -Details (
+            "Output: $outPath`n" +
+            "Elapsed: $($sw.Elapsed.ToString('hh\:mm\:ss'))`n" +
+            "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
+        )
+        Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
+        Remove-Item $outPath -Force -ErrorAction SilentlyContinue
+    } elseif ($proc.ExitCode -eq 0) {
         Write-Host "  [OK] $('Saved'): $outPath" -ForegroundColor Green
     } else {
         Write-Host "  [X] $('Conversion failed')" -ForegroundColor Red
+        Write-ErrorLog -Type "ERROR" -FileName $inputFile -Details (
+            "ExitCode: $($proc.ExitCode)`n" +
+            "Output: $outPath`n" +
+            "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
+        )
+        Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
         if ($global:Cfg.EnableLogs -and (Test-Path $logFile)) {
             if (-not (Test-Path $global:Cfg.LogsFolder)) { New-Item -ItemType Directory -Path $global:Cfg.LogsFolder | Out-Null }
             Copy-Item $logFile (Join-Path $global:Cfg.LogsFolder "$baseName`_conv.log") -Force

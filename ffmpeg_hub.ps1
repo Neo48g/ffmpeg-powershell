@@ -62,10 +62,7 @@ function Show-FFmpegInfo {
     Write-Host "  $('VERSION')" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
     try { Write-Host "  $(& $ffPath -version 2>$null | Select-Object -First 1)" -ForegroundColor White } catch {}
-
-    # FFmpeg выводит список кодировщиков/фильтров в консольную кодовую страницу (OEM, cp866 в Windows),
-    # а не в UTF-8. Включем UTF-8 в сессии и меняем кодовую страницы консоли на 65001,
-    # чтобы русские подписи ниже читались корректно.
+	
     try { $prevEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
     $utf8Session = $false
     try {
@@ -237,8 +234,7 @@ function Show-DependenciesMenu {
     } while ($true)
 }
 
-# --- Проверка зависимостей для процесса ---
-# Возвращает список отсутствующих инструментов (пустой список = всё установлено)
+# --- Проверка зависимостей для процесса ---=
 function Get-MissingDependencies {
     param([string]$Choice)
     $missing = @()
@@ -252,8 +248,7 @@ function Get-MissingDependencies {
     return $missing
 }
 
-# Предупреждение при выборе процесса с неподключёнными зависимостями.
-# Возвращает $true, если можно запускать процесс; $false — если нужно вернуться в меню.
+# Предупреждение при выборе процесса с неподключёнными зависимостями.=
 function Test-ProcessDependencies {
     param([string]$Choice)
     $missing = @(Get-MissingDependencies -Choice $Choice)
