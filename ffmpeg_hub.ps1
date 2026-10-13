@@ -52,18 +52,18 @@ function Get-ToolPath {
 function Show-FFmpegInfo {
     Show-Banner "FFMPEG DETAILED INFO"
     if (-not (Test-Command "ffmpeg")) { Write-Host "  [X] $('FFmpeg not found')" -ForegroundColor Red; Read-Host; return }
-    
+
     Write-Host "  $('VERSION')" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
     try { Write-Host "  $(& ffmpeg -version 2>$null | Select-Object -First 1)" -ForegroundColor White } catch {}
-    
+
     Write-Host "`n  $('KEY LIBRARIES & CODECS')" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
-    
+
     $encodersOutput = ""; $filtersOutput = ""
     try { $encodersOutput = & ffmpeg -encoders 2>$null } catch {}
     try { $filtersOutput = & ffmpeg -filters 2>$null } catch {}
-    
+
     $libs = @(
         @{ Name = "libx264"; Desc = "кодировщик H.264"; Check = ($encodersOutput -match "libx264") }
         @{ Name = "libx265"; Desc = "кодировщик H.265/HEVC"; Check = ($encodersOutput -match "libx265") }
@@ -94,7 +94,7 @@ function Show-FFmpegInfo {
             else { Write-Host "  [X]  $c" -ForegroundColor Red }
         }
     } catch {}
-    
+
     Write-Host "`n  $('Press Enter to return...')" -ForegroundColor Gray
     Read-Host
 }
@@ -103,17 +103,17 @@ function Show-FFmpegInfo {
 function Show-DependenciesMenu {
     do {
         Show-Banner "DEPENDENCIES MANAGEMENT"
-        
+
         $ffmpegExe = Get-ToolPath "ffmpeg"
         $ytdlpExe = Get-ToolPath "yt-dlp"
         $nodeExe = Get-ToolPath "node"
 
         $ffmpegStatus = if ($ffmpegExe) { "[OK] $(& $ffmpegExe -version 2>&1 | Select-Object -First 1)" } else { "[X] $('Not found')" }
         $ffmpegColor = if ($ffmpegExe) { "Green" } else { "Red" }
-        
+
         $ytdlpStatus = if ($ytdlpExe) { "[OK] $(& $ytdlpExe --version 2>&1 | Select-Object -First 1)" } else { "[X] $('Not found')" }
         $ytdlpColor = if ($ytdlpExe) { "Green" } else { "Red" }
-        
+
         $nodeStatus = if ($nodeExe) { "[OK] $(& $nodeExe -v 2>&1 | Select-Object -First 1)" } else { "[X] $('Not found')" }
         $nodeColor = if ($nodeExe) { "Green" } else { "Red" }
 
@@ -122,7 +122,7 @@ function Show-DependenciesMenu {
         Write-Host "  FFmpeg (Full GPL): " -NoNewline -ForegroundColor White; Write-Host $ffmpegStatus -ForegroundColor $ffmpegColor
         Write-Host "  yt-dlp:            " -NoNewline -ForegroundColor White; Write-Host $ytdlpStatus -ForegroundColor $ytdlpColor
         Write-Host "  Node.js (LTS):     " -NoNewline -ForegroundColor White; Write-Host $nodeStatus -ForegroundColor $nodeColor
-        
+
         Write-Host "`n  $('ACTIONS')" -ForegroundColor Yellow
         Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
         Write-Host "  [1] $('Install/Update FFmpeg (Full Build)')" -ForegroundColor White
@@ -130,7 +130,7 @@ function Show-DependenciesMenu {
         Write-Host "  [3] $('Install/Update Node.js (LTS)')" -ForegroundColor White
         Write-Host "  [4] $('View FFmpeg Detailed Info')" -ForegroundColor Cyan
         Write-Host "`n  [0] $('Back to Hub')" -ForegroundColor Red
-        
+
              $choice = Read-Host "  Select action"
      switch ($choice) {
          '1' {
@@ -158,8 +158,8 @@ function Show-DependenciesMenu {
                  Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
                  Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
                  Update-LocalPath
-             } catch { 
-                 Write-Host "  [X] $('Error'): $_" -ForegroundColor Red 
+             } catch {
+                 Write-Host "  [X] $('Error'): $_" -ForegroundColor Red
              }
              Read-Host "  Press Enter to continue"
          }
@@ -204,17 +204,50 @@ function Show-DependenciesMenu {
                  Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
                  Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
                  Update-LocalPath
-             } catch { 
-                 Write-Host "  [X] $('Error'): $_" -ForegroundColor Red 
+             } catch {
+                 Write-Host "  [X] $('Error'): $_" -ForegroundColor Red
              }
              Read-Host "  Press Enter to continue"
          }
          '4' { Show-FFmpegInfo }
-         '0' { return } 
-         
+         '0' { return }
+
          default { Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red; Start-Sleep 1 }
      }
     } while ($true)
+}
+
+# --- Проверка зависимостей для процесса ---
+# Возвращает список отсутствующих инструментов (пустой список = всё установлено)
+function Get-MissingDependencies {
+    param([string]$Choice)
+    $missing = @()
+    switch ($Choice) {
+        { $_ -in '1','2','3' } { if (-not (Get-ToolPath "ffmpeg")) { $missing += "FFmpeg" } }
+        '4' {
+            if (-not (Get-ToolPath "yt-dlp"))  { $missing += "yt-dlp" }
+            if (-not (Get-ToolPath "ffmpeg")) { $missing += "FFmpeg" }
+        }
+    }
+    return $missing
+}
+
+# Предупреждение при выборе процесса с неподключёнными зависимостями.
+# Возвращает $true, если можно запускать процесс; $false — если нужно вернуться в меню.
+function Test-ProcessDependencies {
+    param([string]$Choice)
+    $missing = @(Get-MissingDependencies -Choice $Choice)
+    if ($missing.Count -eq 0) { return $true }
+
+    Write-Host "`n  [!] $('Missing dependencies'): $(($missing -join ', '))" -ForegroundColor Red
+    Write-Host "  $('This process may not work correctly until they are installed.')" -ForegroundColor Gray
+    Write-Host "  [Y] $('Go to Dependencies Menu')  [N] $('Run Anyway')  [B] $('Back')" -ForegroundColor White
+    $ans = (Read-Host "  Choice").Trim().ToUpper()
+    switch ($ans) {
+        'Y' { Show-DependenciesMenu; return $false }
+        'B' { return $false }
+        default { return $true }
+    }
 }
 
 # --- Глобальные настройки ---
@@ -270,12 +303,14 @@ do {
     Write-Host "  [6] $('Global Settings')" -ForegroundColor Cyan
     Write-Host "  [7] $('Help & Guide')" -ForegroundColor Cyan
     Write-Host "  [0] $('Exit')" -ForegroundColor Red
-    
+
     $choice = Read-Host "`n  $('Enter choice')"
-    
+
     if ($scripts.ContainsKey($choice)) {
+        # Проверка установленных зависимостей перед запуском процесса
+        if (-not (Test-ProcessDependencies -Choice $choice)) { continue }
         $path = Join-Path $ScriptDir $scripts[$choice]
-        if (Test-Path $path) { & $path } 
+        if (Test-Path $path) { & $path }
         else { Write-Host "`n  [!] $('Script not found'): $path" -ForegroundColor Red; Start-Sleep 2 }
     } else {
         switch ($choice) {
