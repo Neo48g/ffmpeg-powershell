@@ -140,11 +140,12 @@ function Select-VideoQuality {
                 # Извлекаем базовое имя кодека (напр. avc1.640028 -> avc1)
                 $vcodec = if ($f.vcodec) { ($f.vcodec -split '\.')[0] } else { "N/A" }
 
+                # Пропускаем форматы без известной информации о размере (N/A size)
                 $sizeBytes = if ($f.filesize) { $f.filesize } elseif ($f.filesize_approx) { $f.filesize_approx } else { 0 }
+                if ($sizeBytes -lt 1KB) { continue }
                 if ($sizeBytes -ge 1GB) { $sizeStr = "{0:N2} GB" -f ($sizeBytes / 1GB) }
                 elseif ($sizeBytes -ge 1MB) { $sizeStr = "{0:N2} MB" -f ($sizeBytes / 1MB) }
-                elseif ($sizeBytes -ge 1KB) { $sizeStr = "{0:N2} KB" -f ($sizeBytes / 1KB) }
-                else { $sizeStr = "N/A" }
+                else { $sizeStr = "{0:N2} KB" -f ($sizeBytes / 1KB) }
 
                 # Если в MP4-формате нет аудиодорожки, автоматически добавляем +ba для загрузки лучшего аудио.
                 $hasAudio = ($f.acodec -ne 'none' -and $f.acodec -ne $null)
