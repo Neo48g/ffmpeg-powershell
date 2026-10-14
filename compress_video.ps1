@@ -259,12 +259,12 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [0] $('START COMPRESSION')" -ForegroundColor Green
     Write-Host "  [9] $('Back to Hub')" -ForegroundColor Red
-    Write-Host "  $('Tip'): Drag and drop video files into this window to add them; press L during compression to write a log entry" -ForegroundColor DarkGray
+    Write-Host "  $('Tip'): Press L during compression to write a log entry" -ForegroundColor DarkGray
 
     $c = Read-Host "  Choice"
     switch ($c) {
         '1' {
-            Write-Host "`n  $('Drag files into this window (or paste paths below), then press Enter:')  $('(empty line to cancel)')" -ForegroundColor Yellow
+            Write-Host "`n  $('Drag file or folder with files into window, then press Enter:')  $('(empty line to cancel)')" -ForegroundColor Yellow
             $dropped = @()
             while ($true) {
                 $line = Read-Host "  > "
