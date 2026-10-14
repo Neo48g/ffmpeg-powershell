@@ -15,16 +15,11 @@ function Show-Banner {
 }
 
 # --- Переменные состояния ---
-# Файлы для сжатия берутся из папки inputCompress (создаётся автоматически, если отсутствует)
-$script:compressSourceFolder = Join-Path $ScriptDir "inputCompress"
-if (-not (Test-Path $script:compressSourceFolder)) {
-    New-Item -ItemType Directory -Path $script:compressSourceFolder -Force | Out-Null
-}
-$script:inputFolder = $script:compressSourceFolder
+# Файлы для сжатия добавляются перетаскиванием (drag & drop) в окно скрипта (как в опции Trim)
+$script:selectedFiles = New-Object System.Collections.Generic.List[string]
 $script:crfValue = 23; $script:hwDevice = "CPU"; $script:codec = "h264"
 $script:enableVMAF = $false; $script:enableAutoCRF = $false
 $script:vmafThreshold = 90; $script:maxIterations = 3; $script:minCRF = 18
-$script:enableRecursiveSearch = $false
 $script:presets = @{}
 $extensions = @(".mp4",".mkv",".avi",".mov",".m4v",".webm",".ts",".mts",".flv",".wmv")
 $excludedFolders = @("compressed", "trimmed", "converted", "downloaded", "logs")
@@ -120,7 +115,7 @@ function Write-ErrorLog {
             "======================================================================"
             "[$Type] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             "File: $FileName"
-            "Settings: HW=$script:hwDevice | Codec=$script:codec | CRF=$script:crfValue | VMAF=$(if($script:enableVMAF){'ON'}else{'OFF'}) | Recursive=$(if($script:enableRecursiveSearch){'ON'}else{'OFF'})"
+            "Settings: HW=$script:hwDevice | Codec=$script:codec | CRF=$script:crfValue | VMAF=$(if($script:enableVMAF){'ON'}else{'OFF'})"
             "Details:"
             $Details
             ""
@@ -193,13 +188,36 @@ function Write-ProgressLog {
 }
 
 # --- Вспомогательные функции основных настроек ---
-function Get-Files {
-    Get-ChildItem -Path $script:inputFolder -File -Recurse:$script:enableRecursiveSearch -ErrorAction SilentlyContinue | Where-Object {
-        $isVideo = $extensions -contains $_.Extension.ToLower()
-        $isAllowed = $true
-        if ($isVideo) { foreach ($part in $_.DirectoryName.Split('\')) { if ($excludedFolders -contains $part.ToLower()) { $isAllowed = $false; break } } }
-        return ($isVideo -and $isAllowed)
+# Drag & drop: при перетаскивании файлов в окно консоли Windows их пути добавляются в очередь сжатия.
+function Add-FilesToQueue {
+    param([string[]]$Paths)
+    $added = 0; $skipped = 0
+    foreach ($p in $Paths) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $clean = $p.Trim().Trim('"').Trim("'")
+        if (-not (Test-Path -LiteralPath $clean)) { $skipped++; continue }
+        $item = Get-Item -LiteralPath $clean
+        if ($item.PSIsContainer) {
+            # если перетащили папку — берём из неё видеофайлы
+            Get-ChildItem -LiteralPath $clean -File -ErrorAction SilentlyContinue | Where-Object { $extensions -contains $_.Extension.ToLower() } | ForEach-Object {
+                if (-not $script:selectedFiles.Contains($_.FullName)) { $script:selectedFiles.Add($_.FullName); $added++ }
+            }
+        } elseif ($extensions -contains $item.Extension.ToLower()) {
+            if (-not $script:selectedFiles.Contains($item.FullName)) { $script:selectedFiles.Add($item.FullName); $added++ }
+        } else { $skipped++ }
     }
+    return [pscustomobject]@{ Added = $added; Skipped = $skipped }
+}
+
+function Build-FileList {
+    $items = @()
+    foreach ($fp in $script:selectedFiles) {
+        if (Test-Path -LiteralPath $fp) {
+            $fi = New-Object System.IO.FileInfo($fp)
+            $items += [pscustomobject]@{ Name = $fi.Name; FullName = $fi.FullName; BaseName = $fi.BaseName }
+        }
+    }
+    return ,@($items)
 }
 
 function Build-FFmpegArgs {
@@ -221,28 +239,47 @@ function Build-FFmpegArgs {
 
 # --- Главный цикл меню ---
 Load-Presets
+# Если файлы были перетащены в окно при запуске — сразу добавляем их в очередь
+$initialDrop = @($args)
+if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null }
+
 :MainLoop do {
     Show-Banner "VIDEO COMPRESSION"
-    $files = Get-Files
-    Write-Host "  $('Folder'): $script:inputFolder" -ForegroundColor Gray
-    Write-Host "  $('Files'): $($files.Count) | $('HW'): $script:hwDevice | $('Codec'): $script:codec | $('CRF'): $script:crfValue" -ForegroundColor White
+    $files = Build-FileList
+    Write-Host "  $('Files for compression'): $($files.Count)" -ForegroundColor White
+    foreach ($fd in $files) { Write-Host "    - $($fd.Name)" -ForegroundColor Gray }
+    Write-Host "  $('HW'): $script:hwDevice | $('Codec'): $script:codec | $('CRF'): $script:crfValue" -ForegroundColor White
     Write-Host "  $('VMAF'): $(if($script:enableVMAF){'ON'}else{'OFF'}) | $('AutoCRF'): $(if($script:enableAutoCRF){'ON'}else{'OFF'}) | $('Presets'): $($script:presets.Count)" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  [1] $('Change Folder')" -ForegroundColor White
+    Write-Host "  [1] $('Add Files (drag & drop into this window)')" -ForegroundColor White
     Write-Host "  [2] $('Hardware & Codec')" -ForegroundColor White
     Write-Host "  [3] $('Quality & VMAF')" -ForegroundColor White
     Write-Host "  [4] $('Presets Management')" -ForegroundColor White
-    Write-Host "  [5] $('Toggle Recursive'): $(if($script:enableRecursiveSearch){'ON'}else{'OFF'})" -ForegroundColor White
+    Write-Host "  [5] $('Clear File List')" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [0] $('START COMPRESSION')" -ForegroundColor Green
     Write-Host "  [9] $('Back to Hub')" -ForegroundColor Red
-    Write-Host "  $('Tip'): Press L during compression to write a log entry" -ForegroundColor DarkGray
+    Write-Host "  $('Tip'): Drag and drop video files into this window to add them; press L during compression to write a log entry" -ForegroundColor DarkGray
 
     $c = Read-Host "  Choice"
     switch ($c) {
         '1' {
-            Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog
-            if ($d.ShowDialog() -eq 'OK') { $script:inputFolder = $d.SelectedPath }
+            Write-Host "`n  $('Drag files into this window (or paste paths below), then press Enter:')  $('(empty line to cancel)')" -ForegroundColor Yellow
+            $dropped = @()
+            while ($true) {
+                $line = Read-Host "  > "
+                if ([string]::IsNullOrWhiteSpace($line)) { break }
+                # строка может содержать несколько путей в кавычках или через пробел/запятую (как при drag&drop)
+                $trimmedLine = $line.Trim().Trim('"')
+                $parts = @([regex]::Matches($trimmedLine, '"([^"]*)"|[^",]+') | ForEach-Object { $_.Value.Trim().Trim('"') } | Where-Object { $_ })
+                foreach ($pt in $parts) { $dropped += $pt.Trim().Trim('"', "'") }
+            }
+            if ($dropped.Count -gt 0) {
+                $res = Add-FilesToQueue -Paths $dropped
+                Write-Host "  [OK] $('Added'): $($res.Added)" -ForegroundColor Green
+                if ($res.Skipped -gt 0) { Write-Host "  [!] $('Skipped (not found or not a video file)'): $($res.Skipped)" -ForegroundColor Yellow }
+                Start-Sleep 1
+            }
         }
         '2' {
             Show-Banner "HARDWARE & CODEC"
@@ -267,12 +304,12 @@ Load-Presets
             }
         }
         '4' { Show-PresetsMenu }
-        '5' { $script:enableRecursiveSearch = -not $script:enableRecursiveSearch }
+        '5' { $script:selectedFiles.Clear() }
         '0' {
             if ($files.Count -eq 0) { Write-Host "`n  [X] $('No files found')" -ForegroundColor Red; Start-Sleep 2; continue }
             # Папка результата создаётся в главной директории скрипта (например: $ScriptDir\compressed)
             function Get-CompressedOutFile {
-                param([System.IO.FileInfo]$SrcFile)
+                param($SrcFile)
                 $outDir = Join-Path $ScriptDir "compressed"
                 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
                 return Join-Path $outDir "$($SrcFile.BaseName)_compressed.mp4"
