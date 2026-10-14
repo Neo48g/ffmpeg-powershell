@@ -4,7 +4,14 @@ $ConfigFile = Join-Path $ScriptDir "global_config.json"
 $PresetsFile = Join-Path $ScriptDir "presets.json"
 
 # --- Глобальная конфигурация ---
-$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$true; LogsFolder=(Join-Path $ScriptDir "logs")} }
+# Создание логов выключено по умолчанию; все логи сохраняются в папку logs
+$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$false; LogsFolder=(Join-Path $ScriptDir "logs")} }
+if (-not ($global:Cfg.PSObject.Properties['LogsFolder'] -or ($global:Cfg -is [System.Collections.IDictionary] -and $global:Cfg.Contains('LogsFolder')))) {
+    $global:Cfg = $global:Cfg + @{ LogsFolder = (Join-Path $ScriptDir "logs") }
+}
+if (-not ($global:Cfg.PSObject.Properties['EnableLogs'] -or ($global:Cfg -is [System.Collections.IDictionary] -and $global:Cfg.Contains('EnableLogs')))) {
+    $global:Cfg = $global:Cfg + @{ EnableLogs = $false }
+}
 
 function Show-Banner {
     param([string]$Title)
@@ -89,8 +96,9 @@ function Show-PresetsMenu {
 }
 
 # --- Логирование ошибок и зависаний ---
-# Файл лога ошибок создаётся в корневой папке скрипта (рядом с compress_video.ps1)
-$script:ErrorLogFile = Join-Path $ScriptDir "compression_errors.log"
+# Все логи сохраняются в папку logs; создание логов выключено по умолчанию (EnableLogs=false)
+$script:LogsFolder = if ($global:Cfg.LogsFolder) { [string]$global:Cfg.LogsFolder } else { Join-Path $ScriptDir "logs" }
+$script:ErrorLogFile = Join-Path $script:LogsFolder "compression_errors.log"
 $script:NoProgressTimeoutSec = 300     # секунд без прогресса => процесс считается зависшим
 # $script:MaxRuntimeSec = 7200          # максимальное время обработки одного файла (сек)
 
@@ -104,7 +112,10 @@ function Write-ErrorLog {
         [string]$FileName,
         [string]$Details
     )
+    # Создание логов выключено по умолчанию — записи не пишутся, файлы не создаются
+    if (-not $global:Cfg.EnableLogs) { return $false }
     try {
+        if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
         # Если лог-файл был удалён вручную — пересоздаём его с заголовком
         if (-not (Test-Path $script:ErrorLogFile)) {
             Set-Content -Path $script:ErrorLogFile -Value @(
@@ -133,13 +144,16 @@ function Get-FFmpegTail {
     return "(no output captured)"
 }
 
-# Сохраняет полный вывод ffmpeg в корневую папку рядом со скриптом (для разбора проблемы)
+# Сохраняет полный вывод ffmpeg в папку logs (для разбора проблемы)
 function Save-FFmpegLogToRoot {
     param([string]$SourceLog, [string]$Stage, [string]$SrcName)
+    # Создание логов выключено по умолчанию — снимки не сохраняются
+    if (-not $global:Cfg.EnableLogs) { return $null }
     try {
         if (-not (Test-Path $SourceLog)) { return $null }
+        if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
         $safeName = ($SrcName -replace '[^\w\.\-]', '_')
-        $dest = Join-Path $ScriptDir ("ffmpeg_{0}_{1}.log" -f $Stage, $safeName)
+        $dest = Join-Path $script:LogsFolder ("ffmpeg_{0}_{1}.log" -f $Stage, $safeName)
         Copy-Item -Path $SourceLog -Destination $dest -Force
         return $dest
     } catch { return $null }

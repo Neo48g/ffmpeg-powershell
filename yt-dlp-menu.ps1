@@ -10,11 +10,19 @@ if (Test-Path $ToolsDir) {
     if ((Test-Path $ffmpegBin) -and ($env:Path -notlike "*$ffmpegBin*")) { $env:Path = "$ffmpegBin;$env:Path" }
 }
 
-$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{} }
+# Создание логов выключено по умолчанию; все логи сохраняются в папку logs
+$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$false; LogsFolder=(Join-Path $ScriptDir "logs")} }
+if (-not ($global:Cfg.PSObject.Properties['LogsFolder'] -or ($global:Cfg -is [System.Collections.IDictionary] -and $global:Cfg.Contains('LogsFolder')))) {
+    $global:Cfg = $global:Cfg + @{ LogsFolder = (Join-Path $ScriptDir "logs") }
+}
+if (-not ($global:Cfg.PSObject.Properties['EnableLogs'] -or ($global:Cfg -is [System.Collections.IDictionary] -and $global:Cfg.Contains('EnableLogs')))) {
+    $global:Cfg = $global:Cfg + @{ EnableLogs = $false }
+}
 function Show-Banner { param([string]$Title) Clear-Host; Write-Host "`n========================================================" -ForegroundColor Cyan; Write-Host "  $Title" -ForegroundColor Yellow; Write-Host "========================================================`n" -ForegroundColor Cyan }
 
-# --- Логирование ошибок (в корневую папку скрипта) ---
-$script:ErrorLogFile = Join-Path $ScriptDir "download_errors.log"
+# --- Логирование ошибок (все логи сохраняются в папку logs) ---
+$script:LogsFolder = if ($global:Cfg.LogsFolder) { [string]$global:Cfg.LogsFolder } else { Join-Path $ScriptDir "logs" }
+$script:ErrorLogFile = Join-Path $script:LogsFolder "download_errors.log"
 
 function Write-ErrorLog {
     param(
@@ -22,7 +30,10 @@ function Write-ErrorLog {
         [string]$FileName,
         [string]$Details
     )
+    # Создание логов выключено по умолчанию — записи не пишутся, файлы не создаются
+    if (-not $global:Cfg.EnableLogs) { return $false }
     try {
+        if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
         # Если лог-файл был удалён вручную — пересоздаём его с заголовком
         if (-not (Test-Path $script:ErrorLogFile)) {
             Set-Content -Path $script:ErrorLogFile -Value @(

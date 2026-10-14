@@ -1,17 +1,29 @@
 #Requires -Version 5.1
 $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
-$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$true; LogsFolder=(Join-Path $ScriptDir "logs")} }
+# --- Глобальная конфигурация ---
+# Создание логов выключено по умолчанию; все логи сохраняются в папку logs
+$global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$false; LogsFolder=(Join-Path $ScriptDir "logs")} }
+if (-not ($global:Cfg.PSObject.Properties['LogsFolder'] -or ($global:Cfg -is [System.Collections.IDictionary] -and $global:Cfg.Contains('LogsFolder')))) {
+    $global:Cfg = $global:Cfg + @{ LogsFolder = (Join-Path $ScriptDir "logs") }
+}
+if (-not ($global:Cfg.PSObject.Properties['EnableLogs'] -or ($global:Cfg -is [System.Collections.IDictionary] -and $global:Cfg.Contains('EnableLogs')))) {
+    $global:Cfg = $global:Cfg + @{ EnableLogs = $false }
+}
 
-# --- Логирование ошибок и зависаний (в корневую папку скрипта) ---
-$script:ErrorLogFile = Join-Path $ScriptDir "conversion_errors.log"
+# --- Логирование ошибок и зависаний (все логи сохраняются в папку logs) ---
+$script:LogsFolder = if ($global:Cfg.LogsFolder) { [string]$global:Cfg.LogsFolder } else { Join-Path $ScriptDir "logs" }
+$script:ErrorLogFile = Join-Path $script:LogsFolder "conversion_errors.log"
 $script:NoProgressTimeoutSec = 300   # секунд без прогресса => процесс считается зависшим
 # Значение можно переопределить в global_config.json: NoProgressTimeoutSec
 if ($null -ne $global:Cfg.NoProgressTimeoutSec) { $script:NoProgressTimeoutSec = [int]$global:Cfg.NoProgressTimeoutSec }
 
 function Write-ErrorLog {
     param([string]$Type, [string]$FileName, [string]$Details)
+    # Создание логов выключено по умолчанию — записи не пишутся, файлы не создаются
+    if (-not $global:Cfg.EnableLogs) { return }
     try {
+        if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
         # Если лог-файл был удалён вручную — пересоздаём его с заголовком
         if (-not (Test-Path $script:ErrorLogFile)) {
             Set-Content -Path $script:ErrorLogFile -Value @(
@@ -66,10 +78,11 @@ function Write-ProgressLog {
         "Output: $OutPath"
     ) -join [Environment]::NewLine
     $savedLog = $null
-    if (Test-Path $LogFile) {
+    if ($global:Cfg.EnableLogs -and (Test-Path $LogFile)) {
         try {
+            if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
             $safeName = ((Split-Path -Leaf $FileName) -replace '[^\w\.\-]', '_')
-            $savedLog = Join-Path $ScriptDir ("ffmpeg_manual_{0}.log" -f $safeName)
+            $savedLog = Join-Path $script:LogsFolder ("ffmpeg_manual_{0}.log" -f $safeName)
             Copy-Item -Path $LogFile -Destination $savedLog -Force
         } catch { $savedLog = $null }
     }
@@ -333,9 +346,10 @@ do {
 
     if ($hung) {
         $rootFFLog = $null
-        if (Test-Path $logFile) {
+        if ($global:Cfg.EnableLogs -and (Test-Path $logFile)) {
             try {
-                $rootFFLog = Join-Path $ScriptDir ("ffmpeg_hang_{0}.log" -f ($baseName -replace '[^\w\.\-]', '_'))
+                if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
+                $rootFFLog = Join-Path $script:LogsFolder ("ffmpeg_hang_{0}.log" -f ($baseName -replace '[^\w\.\-]', '_'))
                 Copy-Item $logFile $rootFFLog -Force
             } catch { $rootFFLog = $null }
         }
@@ -352,9 +366,10 @@ do {
     } else {
         Write-Host "  [X] $('Conversion failed')" -ForegroundColor Red
         $rootFFLog = $null
-        if (Test-Path $logFile) {
+        if ($global:Cfg.EnableLogs -and (Test-Path $logFile)) {
             try {
-                $rootFFLog = Join-Path $ScriptDir ("ffmpeg_error_{0}.log" -f ($baseName -replace '[^\w\.\-]', '_'))
+                if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
+                $rootFFLog = Join-Path $script:LogsFolder ("ffmpeg_error_{0}.log" -f ($baseName -replace '[^\w\.\-]', '_'))
                 Copy-Item $logFile $rootFFLog -Force
             } catch { $rootFFLog = $null }
         }
@@ -366,8 +381,8 @@ do {
         )
         Write-Host "  [X] $('Logged to'): $script:ErrorLogFile" -ForegroundColor DarkGray
         if ($global:Cfg.EnableLogs -and (Test-Path $logFile)) {
-            if (-not (Test-Path $global:Cfg.LogsFolder)) { New-Item -ItemType Directory -Path $global:Cfg.LogsFolder | Out-Null }
-            Copy-Item $logFile (Join-Path $global:Cfg.LogsFolder "$baseName`_conv.log") -Force
+            if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
+            Copy-Item $logFile (Join-Path $script:LogsFolder "$baseName`_conv.log") -Force
         }
     }
     } catch {

@@ -8,12 +8,20 @@ $ToolsDir = Join-Path $ScriptDir "tools"
 # --- Управление глобальной конфигурацией ---
 function Get-Config {
     if (Test-Path $ConfigFile) { return Get-Content $ConfigFile -Raw | ConvertFrom-Json }
-    $def = @{ EnableLogs = $true; LogsFolder = (Join-Path $ScriptDir "logs") }
+    # Создание логов выключено по умолчанию; все логи сохраняются в папку logs
+    $def = @{ EnableLogs = $false; LogsFolder = (Join-Path $ScriptDir "logs") }
     $def | ConvertTo-Json | Out-File $ConfigFile -Encoding UTF8
     return $def
 }
 function Save-Config { param($Cfg) $Cfg | ConvertTo-Json | Out-File $ConfigFile -Encoding UTF8 -Force }
 $global:Cfg = Get-Config
+if (-not $global:Cfg.PSObject.Properties['LogsFolder']) {
+    $global:Cfg | Add-Member -NotePropertyName LogsFolder -NotePropertyValue (Join-Path $ScriptDir "logs")
+}
+if (-not $global:Cfg.PSObject.Properties['EnableLogs']) {
+    # По умолчанию создание логов выключено
+    $global:Cfg | Add-Member -NotePropertyName EnableLogs -NotePropertyValue $false
+}
 
 # --- Вспомогательные функции интерфейса ---
 function Show-Banner {
@@ -62,7 +70,7 @@ function Show-FFmpegInfo {
     Write-Host "  $('VERSION')" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
     try { Write-Host "  $(& $ffPath -version 2>$null | Select-Object -First 1)" -ForegroundColor White } catch {}
-	
+
     try { $prevEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
     $utf8Session = $false
     try {
