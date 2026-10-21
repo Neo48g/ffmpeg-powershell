@@ -5,11 +5,18 @@ $ScriptDir = $PSScriptRoot; if (-not $ScriptDir) { $ScriptDir = Get-Location }
 $ConfigFile = Join-Path $ScriptDir "global_config.json"
 $ToolsDir = Join-Path $ScriptDir "tools"
 
+# --- Информация о программе и автоапдейт ---
+# Текущая версия программы (при успешном автоапдейте обновляется в global_config.json)
+$global:HubDefaultVersion = "1.0.0"
+$global:HubRepo        = "Neo48g/ffmpeg-powershell"  # GitHub-репозиторий для проверки обновлений (последний релиз)
+$global:HubUpdateState = "unknown" # last / none / error / skipped (для повторных проверок в рамках сессии)
+
 # --- Управление глобальной конфигурацией ---
 function Get-Config {
     if (Test-Path $ConfigFile) { return Get-Content $ConfigFile -Raw | ConvertFrom-Json }
     # Создание логов выключено по умолчанию; все логи сохраняются в папку logs
-    $def = @{ EnableLogs = $false; LogsFolder = (Join-Path $ScriptDir "logs") }
+    # Автоапдейт включен по умолчанию (AutoUpdate = $true); отключить можно в настройках [6]
+    $def = @{ EnableLogs = $false; LogsFolder = (Join-Path $ScriptDir "logs"); AutoUpdate = $true }
     $def | ConvertTo-Json | Out-File $ConfigFile -Encoding UTF8
     return $def
 }
@@ -22,6 +29,11 @@ if (-not $global:Cfg.PSObject.Properties['EnableLogs']) {
     # По умолчанию создание логов выключено
     $global:Cfg | Add-Member -NotePropertyName EnableLogs -NotePropertyValue $false
 }
+if (-not $global:Cfg.PSObject.Properties['AutoUpdate']) {
+    # По умолчанию автоапдейт включен
+    $global:Cfg | Add-Member -NotePropertyName AutoUpdate -NotePropertyValue $true
+}
+$global:HubVersion = if ($global:Cfg.PSObject.Properties['HubVersion'] -and $global:Cfg.HubVersion) { [string]$global:Cfg.HubVersion } else { $global:HubDefaultVersion }
 
 # --- Вспомогательные функции интерфейса ---
 function Show-Banner {
@@ -42,6 +54,164 @@ function Update-LocalPath {
     if ((Test-Path $nodeBin) -and ($env:Path -notlike "*$nodeBin*")) { $env:Path = "$nodeBin;$env:Path" }
 }
 Update-LocalPath
+
+# --- Автоапдейт программы ---
+function Get-LatestHubRelease {
+    # Возвращает объект с полями Version, ZipUrl и ArchiveName последнего релиза (или $null)
+    try {
+        $api = "https://api.github.com/repos/$global:HubRepo/releases/latest"
+        $rel = Invoke-RestMethod -Uri $api -UseBasicParsing -TimeoutSec 10 -Headers @{ 'User-Agent' = 'FFmpegToolsHub' }
+        if (-not $rel -or -not $rel.tag_name) { return $null }
+        $ver = $rel.tag_name -replace '^v', ''
+        # Приоритет: .zip-архивы, затем другие поддерживаемые архивы (.rar/.7z), затем исходники (Source code / tar.gz)
+        $asset = $rel.assets | Where-Object { $_.name -match '(?i)\.zip$' } | Select-Object -First 1
+        if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -match '(?i)\.(rar|7z)$' } | Select-Object -First 1 }
+        if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -match '(?i)\.tar\.gz$|Source' } | Select-Object -First 1 }
+        return [pscustomobject]@{ Version = $ver; ZipUrl = if ($asset) { $asset.browser_download_url } else { $null }; ArchiveName = if ($asset) { $asset.name } else { $null }; HtmlUrl = $rel.html_url }
+    } catch { return $null }
+}
+
+function Expand-HubArchive {
+    param([string]$ArchivePath, [string]$Destination)
+    # Распаковывает zip штатно; rar/7z — через WinRAR или 7-Zip (если установлены); tar.gz — через bsdtar/tar
+    if ($ArchivePath -match '(?i)\.zip$') {
+        Expand-Archive -Path $ArchivePath -DestinationPath $Destination -Force
+        return
+    }
+    if (-not (Test-Path $Destination)) { New-Item -ItemType Directory -Path $Destination -Force | Out-Null }
+    $extractors = @(
+        "$env:ProgramFiles\WinRAR\WinRAR.exe",
+        "${env:ProgramFiles(x86)}\WinRAR\WinRAR.exe",
+        "$env:ProgramFiles\WinRAR\Rar.exe",
+        "$env:ProgramFiles\7-Zip\7z.exe",
+        "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    foreach ($exe in $extractors) {
+        & $exe x "-o+" "-y" $ArchivePath "$Destination\" 2>$null | Out-Null
+        if ((Get-ChildItem -Path $Destination -Recurse -File -ErrorAction SilentlyContinue).Count -gt 0) { return }
+    }
+    if ($ArchivePath -match '(?i)\.tar\.gz$') {
+        tar -xzf $ArchivePath -C $Destination
+        if ((Get-ChildItem -Path $Destination -Recurse -File -ErrorAction SilentlyContinue).Count -gt 0) { return }
+    }
+    throw "Cannot extract '$(Split-Path $ArchivePath -Leaf)': no suitable extractor found (need WinRAR or 7-Zip for RAR/7Z archives)."
+}
+
+function Install-HubUpdate {
+    param([string]$ArchiveUrl, [string]$NewVersion)
+    # Скачивает архив последнего релиза с GitHub (zip/rar/7z/tar.gz), бэкапит текущие .ps1/.bat и заменяет их файлами из архива
+    $ext = if ($ArchiveUrl -match '(?i)\.(rar|7z|zip|tar\.gz)(\?|$)') { $Matches[1] } else { 'zip' }
+    $arcPath  = Join-Path $env:TEMP "hub_update.$ext"
+    $tempDir  = Join-Path $env:TEMP "hub_update_extract"
+    $backupDir = Join-Path $ScriptDir "backup_v$global:HubVersion"
+    try {
+        if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Write-Host "  $('Downloading update...')`n" -ForegroundColor Cyan
+        $wc = New-Object System.Net.WebClient
+        $wc.DownloadFile($ArchiveUrl, $arcPath)
+        Expand-HubArchive -ArchivePath $arcPath -Destination $tempDir
+
+        # Корень архива: если все файлы лежат в одной папке верхнего уровня (например "<repo>-<sha>" у GitHub Source code)
+        $srcRoot = Get-Item $tempDir
+        $topDirs = @(Get-ChildItem -Path $tempDir -Directory)
+        if ((@(Get-ChildItem -Path $tempDir -File).Count -eq 0) -and $topDirs.Count -eq 1) { $srcRoot = $topDirs[0] }
+
+        $files = @(Get-ChildItem -Path $srcRoot.FullName -File | Where-Object { $_.Extension -in '.ps1', '.bat' })
+        if ($files.Count -eq 0) { throw "No update files found in archive." }
+
+        if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
+        foreach ($f in $files) {
+            $target = Join-Path $ScriptDir $f.Name
+            if (Test-Path $target) { Copy-Item $target -Destination $backupDir -Force }
+        }
+        foreach ($f in $files) {
+            Copy-Item $f.FullName -Destination (Join-Path $ScriptDir $f.Name) -Force
+        }
+        Remove-Item $arcPath -Force -ErrorAction SilentlyContinue
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        # Фиксируем новую версию в конфигурации (AutoUpdate/настройки сохраняются)
+        try {
+            $cfgNow = Get-Config
+            if ($cfgNow.PSObject.Properties['HubVersion']) { $cfgNow.HubVersion = $NewVersion }
+            else { $cfgNow | Add-Member -NotePropertyName HubVersion -NotePropertyValue $NewVersion }
+            Save-Config $cfgNow
+            $global:Cfg = $cfgNow
+        } catch {}
+        Write-Host "  [OK] $('Update installed to version') $NewVersion" -ForegroundColor Green
+        Write-Host "  $('Backup of previous files saved to'): $backupDir" -ForegroundColor Gray
+        return $true
+    } catch {
+        Write-Host "  [X] $('Update failed'): $_" -ForegroundColor Red
+        Write-Host "  $('Your current version was not modified.')" -ForegroundColor Gray
+        return $false
+    }
+}
+
+function Invoke-HubAutoUpdate {
+    param([switch]$Manual)
+    # Если автоапдейт выключен в настройках и запуск не ручной — пропускаем проверку
+    if (-not $Manual -and -not $global:Cfg.AutoUpdate) { return }
+    # В рамках одной сессии повторные автоматические проверки не выполняем
+    if (-not $Manual -and $global:HubUpdateState -ne 'unknown') { return }
+
+    Show-Banner "AUTO-UPDATE CHECK"
+    Write-Host "  $('Current version'): $global:HubVersion" -ForegroundColor White
+    Write-Host "  $('Checking for updates...')`n" -ForegroundColor Cyan
+    $latest = Get-LatestHubRelease
+    if (-not $latest) {
+        $global:HubUpdateState = 'error'
+        Write-Host "`n  [!] $('Unable to check for updates (no internet or repository unavailable). Continuing with the current version.')" -ForegroundColor Yellow
+        if ($Manual) { Read-Host "  Press Enter to continue" }
+        else { Start-Sleep 2 }
+        return
+    }
+    try {
+        $cur = [version]$global:HubVersion
+        $new = [version]($latest.Version -replace '^v','')
+    } catch {
+        $global:HubUpdateState = 'error'
+        Write-Host "  [!] $('Cannot compare versions'): $($latest.Version)" -ForegroundColor Yellow
+        if ($Manual) { Read-Host "  Press Enter to continue" }
+        return
+    }
+
+    if ($new -le $cur) {
+        $global:HubUpdateState = 'last'
+        Write-Host "  [OK] $('You are using the latest version') ($global:HubVersion)`n" -ForegroundColor Green
+        if ($Manual) { Read-Host "  Press Enter to continue" }
+        return
+    }
+
+    $global:HubUpdateState = 'none'
+    Write-Host "  $('A new version is available'): $global:HubVersion -> $($latest.Version)" -ForegroundColor Yellow
+    Write-Host "  [Y] $('Install update now')  [N] $('Skip this session')  [D] $('Download later from Releases page')" -ForegroundColor White
+    $ans = ""
+    try { $ans = (Read-Host "  Choice").Trim().ToUpper() } catch { $ans = "N" }
+    switch ($ans) {
+        'Y' {
+            if ($latest.ZipUrl) {
+                Write-Host "  $('Update archive'): $($latest.ArchiveName)" -ForegroundColor Gray
+                if (Install-HubUpdate -ArchiveUrl $latest.ZipUrl -NewVersion $latest.Version) {
+                    Write-Host "`n  $('The program will be restarted with the new version...')" -ForegroundColor Cyan
+                    $hubPath = Join-Path $ScriptDir "ffmpeg_hub.ps1"
+                    $batPath = Join-Path $ScriptDir "RUN_HUB.bat"
+                    if (Test-Path $batPath) { Start-Process cmd.exe -ArgumentList "/c","`"$batPath`"" }
+                    elseif (Test-Path $hubPath) { Start-Process powershell.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","`"$hubPath`"" }
+                    exit 0
+                }
+            } else {
+                Write-Host "  [!] $('No update archive found in release. Opening Releases page in browser...')" -ForegroundColor Yellow
+                Start-Process $latest.HtmlUrl
+            }
+        }
+        'D' { if ($latest.HtmlUrl) { Start-Process $latest.HtmlUrl } }
+        default { Write-Host "  $('Update skipped for this session.')" -ForegroundColor Gray }
+    }
+    if ($Manual) { Start-Sleep 1 } else { Start-Sleep 2 }
+}
+
+# Проверка обновлений при запуске (если автоапдейт включен в настройках)
+Invoke-HubAutoUpdate
 
 function Get-ToolPath {
     param([string]$ToolName)
@@ -154,6 +324,7 @@ function Show-DependenciesMenu {
         Write-Host "  [2] $('Install/Update yt-dlp')" -ForegroundColor White
         Write-Host "  [3] $('Install/Update Node.js (LTS)')" -ForegroundColor White
         Write-Host "  [4] $('View FFmpeg Detailed Info')" -ForegroundColor Cyan
+        Write-Host "  [5] $('Check for Hub Updates (manual)')" -ForegroundColor Cyan
         Write-Host "`n  [0] $('Back to Hub')" -ForegroundColor Red
 
              $choice = Read-Host "  Select action"
@@ -235,6 +406,7 @@ function Show-DependenciesMenu {
              Read-Host "  Press Enter to continue"
          }
          '4' { Show-FFmpegInfo }
+         '5' { Invoke-HubAutoUpdate -Manual }
          '0' { return }
 
          default { Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red; Start-Sleep 1 }
@@ -275,17 +447,36 @@ function Test-ProcessDependencies {
 
 # --- Глобальные настройки ---
 function Show-SettingsMenu {
-    Show-Banner "GLOBAL SETTINGS"
-    Write-Host "  [1] $('Logging'): $(if ($global:Cfg.EnableLogs) { '[ON]' } else { '[OFF]' })" -ForegroundColor White
-    Write-Host "  [2] $('Open Logs Folder')" -ForegroundColor White
-    Write-Host "  [3] $('Clear All Logs')" -ForegroundColor White
-    Write-Host "`n  [0] $('Back to Hub')" -ForegroundColor Gray
-    $choice = Read-Host "  Choice"
-    switch ($choice) {
-        '1' { $global:Cfg.EnableLogs = -not $global:Cfg.EnableLogs; Save-Config $global:Cfg }
-        '2' { if (-not (Test-Path $global:Cfg.LogsFolder)) { New-Item -ItemType Directory -Path $global:Cfg.LogsFolder | Out-Null }; Start-Process explorer.exe $global:Cfg.LogsFolder }
-        '3' { if (Test-Path $global:Cfg.LogsFolder) { Remove-Item "$($global:Cfg.LogsFolder)\*" -Force -Recurse -ErrorAction SilentlyContinue; Write-Host "  $('Logs cleared.')" -ForegroundColor Green } }
-    }
+    do {
+        Show-Banner "GLOBAL SETTINGS"
+        Write-Host "  [1] $('Logging'): $(if ($global:Cfg.EnableLogs) { '[ON]' } else { '[OFF]' })" -ForegroundColor White
+        Write-Host "  [2] $('Open Logs Folder')" -ForegroundColor White
+        Write-Host "  [3] $('Clear All Logs')" -ForegroundColor White
+        Write-Host "  [4] $('Auto-Update'): $(if ($global:Cfg.AutoUpdate) { '[ON]' } else { '[OFF]' })" -NoNewline -ForegroundColor White
+        Write-Host "   $('(automatic program update check on startup)')" -ForegroundColor Gray
+        Write-Host "  [5] $('Check for Updates Now')" -ForegroundColor White
+        Write-Host "`n  [0] $('Back to Hub')" -ForegroundColor Gray
+        $choice = Read-Host "  Choice"
+        switch ($choice) {
+            '1' { $global:Cfg.EnableLogs = -not $global:Cfg.EnableLogs; Save-Config $global:Cfg }
+            '2' { if (-not (Test-Path $global:Cfg.LogsFolder)) { New-Item -ItemType Directory -Path $global:Cfg.LogsFolder | Out-Null }; Start-Process explorer.exe $global:Cfg.LogsFolder }
+            '3' { if (Test-Path $global:Cfg.LogsFolder) { Remove-Item "$($global:Cfg.LogsFolder)\*" -Force -Recurse -ErrorAction SilentlyContinue; Write-Host "  $('Logs cleared.')" -ForegroundColor Green } }
+            '4' {
+                $global:Cfg.AutoUpdate = -not $global:Cfg.AutoUpdate
+                Save-Config $global:Cfg
+                if ($global:Cfg.AutoUpdate) {
+                    Write-Host "  [OK] $('Auto-update enabled: the program will check for new versions on every launch.')" -ForegroundColor Green
+                } else {
+                    Write-Host "  [OK] $('Auto-update disabled: you can still update manually via Dependencies menu [5].')" -ForegroundColor Yellow
+                }
+                Start-Sleep 2
+            }
+            '5' { Invoke-HubAutoUpdate -Manual }
+            '0' { return }
+            default { Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red; Start-Sleep 1 }
+        }
+        Start-Sleep 1
+    } while ($true)
 }
 
 # --- Справка / Руководство ---
@@ -303,6 +494,11 @@ function Show-Guide {
     Write-Host "  $('VMAF & AUTO CRF')" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
     Write-Host "    $('VMAF measures perceived video quality (0-100). 90+ is excellent.')" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  $('AUTO-UPDATE')" -ForegroundColor Yellow
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor Cyan
+    Write-Host "    $('With Auto-Update ON the hub checks GitHub Releases on every launch.')" -ForegroundColor Gray
+    Write-Host "    $('Turn it OFF in Global Settings [4]. Manual check is always available in Settings [5].')" -ForegroundColor Gray
     Write-Host "`n  $('Press Enter to return to Hub...')" -ForegroundColor White
     Read-Host
 }
