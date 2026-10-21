@@ -27,6 +27,9 @@ $script:selectedFiles = New-Object System.Collections.Generic.List[string]
 $script:crfValue = 23; $script:hwDevice = "CPU"; $script:codec = "h264"
 $script:enableVMAF = $false; $script:enableAutoCRF = $false
 $script:vmafThreshold = 90; $script:maxIterations = 3; $script:minCRF = 18
+# Ограничение целевого размера файла (МБ). 0 = выключено. Варианты: 10, 20 или своё значение.
+$script:targetSizeMB = 0
+$script:LastProgressInfo = @{ CurrentTime = 0.0; Percent = 0.0 }  # обновляется циклом прогресса
 $script:presets = @{}
 $extensions = @(".mp4",".mkv",".avi",".mov",".m4v",".webm",".ts",".mts",".flv",".wmv")
 $excludedFolders = @("compressed", "trimmed", "converted", "downloaded", "logs")
@@ -60,6 +63,7 @@ function Show-PresetsMenu {
                     HwDevice=$script:hwDevice; Codec=$script:codec; CRF=$script:crfValue
                     EnableVMAF=$script:enableVMAF; EnableAutoCRF=$script:enableAutoCRF
                     VMAFThreshold=$script:vmafThreshold; MaxIterations=$script:maxIterations; MinCRF=$script:minCRF
+                    TargetSizeMB=$script:targetSizeMB
                 }
                 Save-Presets
                 Write-Host "`n  [OK] $('Preset saved')" -ForegroundColor Green
@@ -68,13 +72,14 @@ function Show-PresetsMenu {
             '2' {
                 if ($script:presets.Count -eq 0) { Write-Host "`n  [X] $('No presets saved')" -ForegroundColor Red; Start-Sleep 1; continue }
                 $keys = $script:presets.Keys | Sort-Object; $i = 1
-                foreach ($k in $keys) { Write-Host "  [$i] $k ($($script:presets[$k].HwDevice) | $($script:presets[$k].Codec) | CRF:$($script:presets[$k].CRF))" -ForegroundColor White; $i++ }
+                foreach ($k in $keys) { Write-Host "  [$i] $k ($($script:presets[$k].HwDevice) | $($script:presets[$k].Codec) | CRF:$($script:presets[$k].CRF) | $(if ($script:presets[$k].TargetSizeMB -gt 0) { "<=$($script:presets[$k].TargetSizeMB) MB" } else { 'MaxSize:OFF' }))" -ForegroundColor White; $i++ }
                 $idx = Read-Host "  Select number"
                 if ($idx -match '^\d+$' -and [int]$idx -ge 1 -and [int]$idx -le $keys.Count) {
                     $p = $script:presets[$keys[[int]$idx - 1]]
                     $script:hwDevice=$p.HwDevice; $script:codec=$p.Codec; $script:crfValue=[int]$p.CRF
                     $script:enableVMAF=[bool]$p.EnableVMAF; $script:enableAutoCRF=[bool]$p.EnableAutoCRF
                     $script:vmafThreshold=[int]$p.VMAFThreshold; $script:maxIterations=[int]$p.MaxIterations; $script:minCRF=[int]$p.MinCRF
+                    if ($null -ne $p.TargetSizeMB) { $script:targetSizeMB = [double]$p.TargetSizeMB } else { $script:targetSizeMB = 0 }
                     Write-Host "`n  [OK] $('Preset loaded')" -ForegroundColor Green
                     Start-Sleep 1
                 }
@@ -105,6 +110,174 @@ $script:NoProgressTimeoutSec = 300     # секунд без прогресса 
 # Значения можно переопределить в global_config.json: NoProgressTimeoutSec / MaxRuntimeSec
 if ($null -ne $global:Cfg.NoProgressTimeoutSec) { $script:NoProgressTimeoutSec = [int]$global:Cfg.NoProgressTimeoutSec }
 if ($null -ne $global:Cfg.MaxRuntimeSec)        { $script:MaxRuntimeSec = [int]$global:Cfg.MaxRuntimeSec }
+
+# --- Сжатие до целевого размера файла (двухпроходное кодирование по битрейту) ---
+# Возвращает строку аргументов ffmpeg для одного прохода; $PassNum = 1 или 2.
+function Build-TwoPassArgs {
+    param([int]$VideoBitrateK, [double]$AudioBitrateK, [int]$PassNum, [string]$PassLogFile)
+    $vCodec = switch ($script:codec) { "h265" {"libx265"} "av1" {"libsvtav1"} default {"libx264"} }
+    $aArgs = if ($AudioBitrateK -gt 0) { "-c:a aac -b:a ${AudioBitrateK}k" } else { "-an" }
+    $passLogArg = if ($PassLogFile) { " -passlogfile `"$PassLogFile`"" } else { "" }
+    return "-c:v $vCodec -preset medium -b:v ${VideoBitrateK}k -maxrate ${VideoBitrateK}k -bufsize $([int]($VideoBitrateK * 2))k -pass $PassNum$passLogArg $aArgs"
+}
+
+# Двухпроходное сжатие до целевого размера. Возвращает $true при успехе.
+function Invoke-TwoPassToTargetSize {
+    param([string]$SrcPath, [string]$OutPath, [pscustomobject]$Meta, [double]$TargetMB)
+    $duration = [double]$Meta.duration
+    if ($duration -le 0) { return $false }
+
+    $targetBytes  = [math]::Floor($TargetMB * 1MB * 0.98)  # 2% запас на контейнер
+    $targetBits   = $targetBytes * 8.0
+    $audioBits    = [double]$Meta.audioBitrate             # бит/сек (0 = аудио нет)
+    $videoTotalK  = [int][math]::Floor(($targetBits / $duration - $audioBits) / 1000.0)
+    $minVideoKbps = if ($Meta.width -ge 1920) { 300 } elseif ($Meta.width -ge 1280) { 200 } else { 120 }
+    if ($videoTotalK -lt $minVideoKbps) { $videoTotalK = $minVideoKbps }
+
+    # Разделение видео-битрейта между проходами: первый проход — анализ (stats), второй — финальный файл
+    $pass1K = [int][math]::Max(120, $videoTotalK * 0.4); $pass2K = $videoTotalK
+    $passLog = Join-Path $env:TEMP ("ffmpeg2pass_" + [System.IO.Path]::GetFileNameWithoutExtension($OutPath))
+    Remove-Item "$passLog*.log*" -Force -ErrorAction SilentlyContinue
+    $swAll = [System.Diagnostics.Stopwatch]::StartNew()
+
+    for ($pass = 1; $pass -le 2; $pass++) {
+        $bk = if ($pass -eq 1) { $pass1K } else { $pass2K }
+        $vArgs = Build-TwoPassArgs -VideoBitrateK $bk -AudioBitrateK ([int]($audioBits/1000)) -PassNum $pass -PassLogFile $passLog
+        $args = "-hide_banner -loglevel info -i `"$SrcPath`" $vArgs -y `"$OutPath`""
+        $logFile = Join-Path $env:TEMP "ffmpeg_comp_pass$pass.txt"
+        if ($pass -eq 2 -and (Test-Path $OutPath)) { Remove-Item $OutPath -Force -ErrorAction SilentlyContinue }
+
+        Write-Host "  -> $('Two-pass compression'): pass $pass/2 | $('Video bitrate'): ${bk} kbps" -ForegroundColor Cyan
+        $proc = Start-Process -FilePath "ffmpeg" -ArgumentList $args -RedirectStandardError $logFile -PassThru -NoNewWindow
+
+        $lastTime = -1.0; $lastLogSize = 0; $lastOutSize = 0; $lastProgressAt = $swAll.Elapsed
+        $hung = $false
+        while (-not $proc.HasExited) {
+            $currentTime = 0
+            if (Test-Path $logFile) {
+                try {
+                    foreach ($line in @(Get-Content $logFile -Tail 5 -ErrorAction SilentlyContinue)) {
+                        if ($line -match 'time=(\d+):(\d+):(\d+(?:\.\d+)?)') {
+                            $currentTime = [int]$matches[1]*3600 + [int]$matches[2]*60 + [double]$matches[3]
+                        }
+                    }
+                } catch {}
+            }
+            $percent = 0
+            if ($duration -gt 0) { $percent = [math]::Min(100, ($currentTime / $duration) * 100) }
+            $status = "Pass $pass/2 | $('Time'): $($swAll.Elapsed.ToString('hh\:mm\:ss')) | $('Press L to write log')"
+            if ($duration -gt 0) { $status += " | $('Progress'): $([math]::Round($percent, 1))%" }
+            Write-Progress -Activity "('Two-pass compression'): $(Split-Path $OutPath -Leaf)" -Status $status -PercentComplete $percent -Id 1
+
+            $script:LastProgressInfo.CurrentTime = $currentTime
+            $script:LastProgressInfo.Percent = $percent
+            if (Test-LoggingHotkey) {
+                $res = Write-ProgressLog -FileName $SrcPath -Stage "CompressPass$pass" -Iteration $pass `
+                    -CurrentCRF $videoTotalK -ElapsedSec $swAll.Elapsed.TotalSeconds -LogFile $logFile `
+                    -FileCount 1 -Index 1
+                if ($res.Success) { Write-Host "`n  [LOG] $('State written to log'): $($res.LogFile)" -ForegroundColor Magenta }
+            }
+
+            $logSize = 0; $outSize = 0
+            try { if (Test-Path $logFile) { $logSize = (Get-Item $logFile).Length } } catch {}
+            try { if (Test-Path $OutPath) { $outSize = (Get-Item $OutPath).Length } } catch {}
+            if ($currentTime -gt $lastTime -or $logSize -ne $lastLogSize -or $outSize -ne $lastOutSize) {
+                $lastTime = $currentTime; $lastLogSize = $logSize; $lastOutSize = $outSize
+                $lastProgressAt = $swAll.Elapsed
+            } elseif ($swAll.Elapsed.TotalSeconds -gt $script:MaxRuntimeSec) {
+                $hung = $true
+                Write-Host "`n  [!] $('Process hung detected: max runtime exceeded'). $('Stopping FFmpeg...')" -ForegroundColor Red
+                try { & taskkill /F /T /PID $proc.Id 2>$null | Out-Null; $proc.Kill() } catch {}
+                break
+            } elseif (($swAll.Elapsed - $lastProgressAt).TotalSeconds -gt $script:NoProgressTimeoutSec) {
+                $hung = $true
+                Write-Host "`n  [!] $('Process hung detected: no progress for') $([int]$script:NoProgressTimeoutSec)$(' s'). $('Stopping FFmpeg...')" -ForegroundColor Red
+                try { & taskkill /F /T /PID $proc.Id 2>$null | Out-Null; $proc.Kill() } catch {}
+                break
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        Write-Progress -Activity "('Two-pass compression'): $(Split-Path $OutPath -Leaf)" -Completed -Id 1
+
+        if ($hung) {
+            $savedLog = Save-FFmpegLogToRoot -SourceLog $logFile -Stage "two-pass_hang" -SrcName (Split-Path $OutPath -Leaf)
+            Write-ErrorLog -Type "HANG" -FileName $SrcPath -Details (
+                "Stage: Two-pass compression, pass $pass | Target: $TargetMB MB | Video bitrate: ${bk} kbps`n" +
+                "Command: ffmpeg $args`n" +
+                $(if ($savedLog) { "Full FFmpeg log saved to: $savedLog`n" } else { "" }) +
+                "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
+            ) | Out-Null
+            Remove-Item $OutPath -Force -ErrorAction SilentlyContinue
+            Remove-Item "$passLog*.log*" -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        if ($pass -eq 2 -and -not ((Test-Path $OutPath) -and ((Get-Item $OutPath).Length -gt 0))) {
+            $savedLog = Save-FFmpegLogToRoot -SourceLog $logFile -Stage "two-pass_error" -SrcName (Split-Path $OutPath -Leaf)
+            Write-ErrorLog -Type "ERROR" -FileName $SrcPath -Details (
+                "Stage: Two-pass compression, pass 2 failed | Target: $TargetMB MB | Video bitrate: ${bk} kbps`n" +
+                "Command: ffmpeg $args`n" +
+                $(if ($savedLog) { "Full FFmpeg log saved to: $savedLog`n" } else { "" }) +
+                "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logFile)
+            ) | Out-Null
+            Remove-Item "$passLog*.log*" -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+    }
+    Remove-Item "$passLog*.log*" -Force -ErrorAction SilentlyContinue
+
+    # Финальная проверка: если файл всё ещё больше лимита — ужесточаем битрейт и пережимаем (до 2 попыток)
+    $attempt = 0
+    while ($attempt -lt 2) {
+        $curBytes = if (Test-Path $OutPath) { (Get-Item $OutPath).Length } else { 0 }
+        if ($curBytes -eq 0) { return $false }
+        if ($curBytes -le [math]::Floor($TargetMB * 1MB)) { break }
+        $attempt++
+        $overRatio = $TargetMB * 1MB / [double]$curBytes
+        $videoTotalK = [int][math]::Max($minVideoKbps, [math]::Floor($videoTotalK * $overRatio * 0.95))
+        Write-Host "  -> $('Over target size, retrying'): pass $($attempt + 2)/... | $('Video bitrate'): ${videoTotalK} kbps" -ForegroundColor Cyan
+        $bk = $videoTotalK
+        $vArgs = Build-TwoPassArgs -VideoBitrateK ([int][math]::Max(120, $bk * 0.4)) -AudioBitrateK ([int]($audioBits/1000)) -PassNum 1 -PassLogFile $passLog
+        $argsP1 = "-hide_banner -loglevel info -i `"$SrcPath`" $vArgs -y `"$OutPath`""
+        $logP1 = Join-Path $env:TEMP "ffmpeg_comp_pass1.txt"
+        $procP1 = Start-Process -FilePath "ffmpeg" -ArgumentList $argsP1 -RedirectStandardError $logP1 -Wait -PassThru -NoNewWindow
+        $vArgs2 = Build-TwoPassArgs -VideoBitrateK $bk -AudioBitrateK ([int]($audioBits/1000)) -PassNum 2 -PassLogFile $passLog
+        if (Test-Path $OutPath) { Remove-Item $OutPath -Force -ErrorAction SilentlyContinue }
+        $argsP2 = "-hide_banner -loglevel info -i `"$SrcPath`" $vArgs2 -y `"$OutPath`""
+        $logP2 = Join-Path $env:TEMP "ffmpeg_comp_pass2.txt"
+        $procP2 = Start-Process -FilePath "ffmpeg" -ArgumentList $argsP2 -RedirectStandardError $logP2 -Wait -PassThru -NoNewWindow
+        if (-not ((Test-Path $OutPath) -and ((Get-Item $OutPath).Length -gt 0))) {
+            $savedLog = Save-FFmpegLogToRoot -SourceLog $logP2 -Stage "two-pass_retry_error" -SrcName (Split-Path $OutPath -Leaf)
+            Write-ErrorLog -Type "ERROR" -FileName $SrcPath -Details ("Stage: Two-pass retry failed | Target: $TargetMB MB | Video bitrate: ${bk} kbps`n" + $(if ($savedLog) { "Full FFmpeg log saved to: $savedLog`n" } else { "" }) + "Last FFmpeg output:`n" + (Get-FFmpegTail -Path $logP2)) | Out-Null
+            Remove-Item "$passLog*.log*" -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+    }
+    Remove-Item "$passLog*.log*" -Force -ErrorAction SilentlyContinue
+    return $true
+}
+
+# Получение метаданных файла: длительность, аудио-битрейт (бит/сек), разрешение
+function Get-VideoMeta {
+    param([string]$Path)
+    $meta = [pscustomobject]@{ duration = 0.0; audioBitrate = 0.0; width = 0 }
+    try {
+        $json = & ffprobe -v error -print_format json -show_format -show_streams "$Path" 2>$null | Out-String
+        if ($json) {
+            $obj = $json | ConvertFrom-Json
+            if ($obj.format.duration) { $meta.duration = [double]$obj.format.duration }
+            foreach ($st in @($obj.streams)) {
+                if ($st.codec_type -eq 'video' -and $st.width -and $meta.width -eq 0) { $meta.width = [int]$st.width }
+                if ($st.codec_type -eq 'audio' -and $st.bit_rate) {
+                    $br = [double]$st.bit_rate
+                    if ($br -gt $meta.audioBitrate) { $meta.audioBitrate = $br }
+                }
+            }
+        }
+    } catch {
+        Write-ErrorLog -Type "ERROR" -FileName $Path -Details "Stage: ffprobe metadata check failed`n$($_.Exception.Message)" | Out-Null
+    }
+    return $meta
+}
 
 function Write-ErrorLog {
     param(
@@ -264,12 +437,15 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
     foreach ($fd in $files) { Write-Host "    - $($fd.Name)" -ForegroundColor Gray }
     Write-Host "  $('HW'): $script:hwDevice | $('Codec'): $script:codec | $('CRF'): $script:crfValue" -ForegroundColor White
     Write-Host "  $('VMAF'): $(if($script:enableVMAF){'ON'}else{'OFF'}) | $('AutoCRF'): $(if($script:enableAutoCRF){'ON'}else{'OFF'}) | $('Presets'): $($script:presets.Count)" -ForegroundColor White
+    $sizeTxt = if ($script:targetSizeMB -gt 0) { "<= $script:targetSizeMB MB" } else { "OFF" }
+    Write-Host "  $('Max file size'): $sizeTxt" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [1] $('Add Files (drag & drop into this window)')" -ForegroundColor White
     Write-Host "  [2] $('Hardware & Codec')" -ForegroundColor White
     Write-Host "  [3] $('Quality & VMAF')" -ForegroundColor White
-    Write-Host "  [4] $('Presets Management')" -ForegroundColor White
-    Write-Host "  [5] $('Clear File List')" -ForegroundColor White
+    Write-Host "  [4] $('Max File Size') ($sizeTxt)" -ForegroundColor White
+    Write-Host "  [5] $('Presets Management')" -ForegroundColor White
+    Write-Host "  [6] $('Clear File List')" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [0] $('START COMPRESSION')" -ForegroundColor Green
     Write-Host "  [9] $('Back to Hub')" -ForegroundColor Red
@@ -317,8 +493,24 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
                 }
             }
         }
-        '4' { Show-PresetsMenu }
-        '5' { $script:selectedFiles.Clear() }
+        '4' {
+            # Отдельное меню ограничения максимального размера файла
+            # (двухпроходное сжатие по битрейту до целевого веса)
+            Show-Banner "MAX FILE SIZE"
+            $curTxt = if ($script:targetSizeMB -gt 0) { "<= $script:targetSizeMB MB" } else { "OFF" }
+            Write-Host "  $('Current'): $curTxt" -ForegroundColor White
+            Write-Host "  [1] $('Off')  [2] 10 MB  [3] 20 MB  $('or enter custom size in MB')" -ForegroundColor White
+            $sz = Read-Host "  Choice [$($script:targetSizeMB)]"
+            if ($sz -eq '1') { $script:targetSizeMB = 0 }
+            elseif ($sz -eq '2') { $script:targetSizeMB = 10 }
+            elseif ($sz -eq '3') { $script:targetSizeMB = 20 }
+            elseif ($sz -match '^\d+(\.\d+)?$' -and [double]$sz -gt 0) { $script:targetSizeMB = [double]$sz }
+            $newTxt = if ($script:targetSizeMB -gt 0) { "<= $script:targetSizeMB MB" } else { "OFF" }
+            Write-Host "  $('Max file size'): $newTxt" -ForegroundColor Green
+            Start-Sleep 1
+        }
+        '5' { Show-PresetsMenu }
+        '6' { $script:selectedFiles.Clear() }
         '0' {
             if ($files.Count -eq 0) { Write-Host "`n  [X] $('No files found')" -ForegroundColor Red; Start-Sleep 2; continue }
             # Папка результата создаётся в главной директории скрипта (например: $ScriptDir\compressed)
@@ -330,7 +522,8 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
             }
 
             # Пишем в корневой лог начало каждого прогона сжатия (INFO) — ошибки ищутся по метке [ERROR]/[HANG]
-            Write-ErrorLog -Type "INFO" -FileName "$($files.Count) file(s)" -Details "Run started | Output: $ScriptDir\compressed\*_compressed.mp4" | Out-Null
+            $sizeTxt = if ($script:targetSizeMB -gt 0) { "<= $script:targetSizeMB MB" } else { "OFF" }
+            Write-ErrorLog -Type "INFO" -FileName "$($files.Count) file(s)" -Details "Run started | Output: $ScriptDir\compressed\*_compressed.mp4 | MaxFileSize: $sizeTxt" | Out-Null
 
             try {
             $i = 1; foreach ($f in $files) {
@@ -344,6 +537,39 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
                     if ($durStr) { $duration = [double]$durStr }
                 } catch {
                     Write-ErrorLog -Type "ERROR" -FileName $f.FullName -Details "Stage: ffprobe duration check failed`n$($_.Exception.Message)" | Out-Null
+                }
+
+                # --- Режим ограничения максимального размера файла (например, 10 или 20 МБ) ---
+                if ($script:targetSizeMB -gt 0) {
+                    $meta = Get-VideoMeta -Path $f.FullName
+                    if ($meta.duration -le 0) {
+                        Write-Host "  [X] $('Could not read video duration, skipping')" -ForegroundColor Red
+                        $i++
+                        continue
+                    }
+                    $srcMB = [math]::Round((Get-Item $f.FullName).Length / 1MB, 2)
+                    $curOutMB = 0
+                    if (Test-Path $outFile) { $curOutMB = [math]::Round((Get-Item $outFile).Length / 1MB, 2) }
+                    if (($srcMB -le $script:targetSizeMB) -and ($curOutMB -eq 0 -or $curOutMB -le $script:targetSizeMB)) {
+                        Write-Host "  [=] $('Already within size limit') ($srcMB $('MB'))" -ForegroundColor Gray
+                        $i++
+                        continue
+                    }
+                    $tpOk = Invoke-TwoPassToTargetSize -SrcPath $f.FullName -OutPath $outFile -Meta $meta -TargetMB $script:targetSizeMB
+                    if (-not $tpOk) {
+                        Write-Host "  [X] $('Two-pass compression failed, logged')" -ForegroundColor Red
+                        break
+                    }
+                    $finalBytes = (Get-Item $outFile).Length
+                    $finalMB = [math]::Round($finalBytes / 1MB, 2)
+                    if ($finalBytes -gt [math]::Floor($script:targetSizeMB * 1MB)) {
+                        Write-Host "  [!] $('Result exceeds target size'): $finalMB $('MB') > $script:targetSizeMB $('MB'). $('Lower bitrate floor reached')" -ForegroundColor Yellow
+                        Write-ErrorLog -Type "ERROR" -FileName $f.FullName -Details "Stage: Two-pass result over target | Final: $finalMB MB | Target: $script:targetSizeMB MB" | Out-Null
+                    } else {
+                        Write-Host "  [OK] $('Final size'): $finalMB / $script:targetSizeMB $('MB')" -ForegroundColor Green
+                    }
+                    $i++
+                    continue
                 }
 
                                 $currentCRF = $script:crfValue; $iteration = 0; $needsRecompress = $true
