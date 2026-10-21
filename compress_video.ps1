@@ -4,7 +4,8 @@ $ConfigFile = Join-Path $ScriptDir "global_config.json"
 $PresetsFile = Join-Path $ScriptDir "presets.json"
 
 # --- Глобальная конфигурация ---
-# Создание логов выключено по умолчанию; все логи сохраняются в папку logs
+# Логи ошибок сохраняются ВСЕГДА; обычные логи — только при включённом пункте настроек (EnableLogs)
+# Все логи сохраняются в папку logs в корневой папке
 $global:Cfg = if (Test-Path $ConfigFile) { Get-Content $ConfigFile -Raw | ConvertFrom-Json } else { @{EnableLogs=$false; LogsFolder=(Join-Path $ScriptDir "logs")} }
 if (-not ($global:Cfg.PSObject.Properties['LogsFolder'] -or ($global:Cfg -is [System.Collections.IDictionary] -and $global:Cfg.Contains('LogsFolder')))) {
     $global:Cfg = $global:Cfg + @{ LogsFolder = (Join-Path $ScriptDir "logs") }
@@ -12,6 +13,8 @@ if (-not ($global:Cfg.PSObject.Properties['LogsFolder'] -or ($global:Cfg -is [Sy
 if (-not ($global:Cfg.PSObject.Properties['EnableLogs'] -or ($global:Cfg -is [System.Collections.IDictionary] -and $global:Cfg.Contains('EnableLogs')))) {
     $global:Cfg = $global:Cfg + @{ EnableLogs = $false }
 }
+# Папка logs всегда находится в корневой папке скрипта
+$global:Cfg.LogsFolder = (Join-Path $ScriptDir "logs")
 
 function Show-Banner {
     param([string]$Title)
@@ -101,8 +104,8 @@ function Show-PresetsMenu {
 }
 
 # --- Логирование ошибок и зависаний ---
-# Все логи сохраняются в папку logs; создание логов выключено по умолчанию (EnableLogs=false)
-$script:LogsFolder = if ($global:Cfg.LogsFolder) { [string]$global:Cfg.LogsFolder } else { Join-Path $ScriptDir "logs" }
+# Логи ошибок сохраняются ВСЕГДА; обычные логи — только при EnableLogs. Все логи — в папку logs в корне.
+$script:LogsFolder = [string]$global:Cfg.LogsFolder
 $script:ErrorLogFile = Join-Path $script:LogsFolder "compression_errors.log"
 $script:NoProgressTimeoutSec = 300     # секунд без прогресса => процесс считается зависшим
 # $script:MaxRuntimeSec = 7200          # максимальное время обработки одного файла (сек)
@@ -281,12 +284,12 @@ function Get-VideoMeta {
 
 function Write-ErrorLog {
     param(
-        [string]$Type,        # ERROR | HANG | INFO
+        [string]$Type,        # ERROR | HANG | INFO | MANUAL
         [string]$FileName,
         [string]$Details
     )
-    # Создание логов выключено по умолчанию — записи не пишутся, файлы не создаются
-    if (-not $global:Cfg.EnableLogs) { return $false }
+    # Логи ошибок (ERROR/HANG) сохраняются ВСЕГДА; обычные логи (INFO/MANUAL) — только при EnableLogs
+    if ((-not $global:Cfg.EnableLogs) -and ($Type -notin @('ERROR','HANG'))) { return $false }
     try {
         if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }
         # Если лог-файл был удалён вручную — пересоздаём его с заголовком
@@ -318,10 +321,11 @@ function Get-FFmpegTail {
 }
 
 # Сохраняет полный вывод ffmpeg в папку logs (для разбора проблемы)
+# Снимки логов ошибок (этапы hang/error) сохраняются ВСЕГДА; обычные (manual и прочие) — только при EnableLogs
 function Save-FFmpegLogToRoot {
     param([string]$SourceLog, [string]$Stage, [string]$SrcName)
-    # Создание логов выключено по умолчанию — снимки не сохраняются
-    if (-not $global:Cfg.EnableLogs) { return $null }
+    $isErrorStage = ($Stage -match 'hang|error')
+    if ((-not $global:Cfg.EnableLogs) -and (-not $isErrorStage)) { return $null }
     try {
         if (-not (Test-Path $SourceLog)) { return $null }
         if (-not (Test-Path $script:LogsFolder)) { New-Item -ItemType Directory -Path $script:LogsFolder -Force | Out-Null }

@@ -14,7 +14,7 @@ $global:HubUpdateState = "unknown" # last / none / error / skipped (для по�
 # --- Управление глобальной конфигурацией ---
 function Get-Config {
     if (Test-Path $ConfigFile) { return Get-Content $ConfigFile -Raw | ConvertFrom-Json }
-    # Создание логов выключено по умолчанию; все логи сохраняются в папку logs
+    # Логи ошибок сохраняются всегда; обычные логи — только при EnableLogs. Все логи — в папку logs в корне.
     # Автоапдейт включен по умолчанию (AutoUpdate = $true); отключить можно в настройках [6]
     $def = @{ EnableLogs = $false; LogsFolder = (Join-Path $ScriptDir "logs"); AutoUpdate = $true }
     $def | ConvertTo-Json | Out-File $ConfigFile -Encoding UTF8
@@ -450,7 +450,7 @@ function Test-ProcessDependencies {
 function Show-SettingsMenu {
     do {
         Show-Banner "GLOBAL SETTINGS"
-        Write-Host "  [1] $('Logging'): $(if ($global:Cfg.EnableLogs) { '[ON]' } else { '[OFF]' })" -ForegroundColor White
+        Write-Host "  [1] $('Logging (normal logs; error logs are always saved)'): $(if ($global:Cfg.EnableLogs) { '[ON]' } else { '[OFF]' })" -ForegroundColor White
         Write-Host "  [2] $('Open Logs Folder')" -ForegroundColor White
         Write-Host "  [3] $('Clear All Logs')" -ForegroundColor White
         Write-Host "  [4] $('Auto-Update'): $(if ($global:Cfg.AutoUpdate) { '[ON]' } else { '[OFF]' })" -NoNewline -ForegroundColor White
