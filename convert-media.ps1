@@ -260,6 +260,116 @@ function Get-FormatArgs {
     return $null
 }
 
+# Читает одно числовое значение для настроек конвертации; Enter оставляет текущее, пустое/некорректное — повтор ввода
+function Read-ConvertParam {
+    param([string]$Name, [string]$Hint, [double]$Cur, [double]$Min, [double]$Max, [ref]$Out)
+    while ($true) {
+        $raw = (Read-Host "  ${Name} [$Cur]").Trim().Replace(',', '.')
+        if ($raw -eq '') { $Out.Value = $Cur; return $true }
+        $val = 0.0
+        if (-not [double]::TryParse($raw, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$val)) {
+            Write-Host "  [X] $('Invalid choice'): $Hint" -ForegroundColor Red; continue
+        }
+        if ($val -lt $Min -or $val -gt $Max) {
+            Write-Host "  [!] ${Hint}: $Min..$Max, $([Math]::Round($val,4)) -> $([Math]::Max($Min,[Math]::Min($Max,$val)))" -ForegroundColor DarkYellow
+            $val = [Math]::Max($Min, [Math]::Min($Max, $val))
+        }
+        $Out.Value = $val
+        return $true
+    }
+}
+
+# Возвращает размеры первого видеопотока файла через ffprobe: @{ Width; Height } или $null
+function Get-VideoDimensions {
+    param([string]$Path)
+    try {
+        $out = & ffprobe -v error -select_streams v:0 `
+            -show_entries stream=width,height `
+            -of default=noprint_wrappers=1:nokey=0 $Path 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
+        $w = 0; $h = 0
+        foreach ($line in $out) {
+            if ($line -match '^\s*width\s*=\s*(\d+)') { $w = [int]$Matches[1] }
+            if ($line -match '^\s*height\s*=\s*(\d+)') { $h = [int]$Matches[1] }
+        }
+        if ($w -gt 0 -and $h -gt 0) { return @{ Width = $w; Height = $h } }
+    } catch {}
+    return $null
+}
+
+# Округляет ширину вниз до чётного числа (безопасно для кодировщиков), но не меньше 16
+function Get-EvenWidth {
+    param([double]$W)
+    $w = [Math]::Floor($W / 2) * 2
+    if ($w -lt 16) { $w = 16 }
+    return [int]$w
+}
+
+# Настройка параметров конвертации видео в GIF; возвращает хэш @{ Ext; Args } или $null при отмене
+function Show-GifSettings {
+    param([string]$InputFile)
+    # Разрешение наследуется от исходного видеофайла; если он недоступен — fallback на прежний пресет 320px
+    $srcDim = Get-VideoDimensions -Path $InputFile
+    if ($srcDim) {
+        $origW = [int]$srcDim.Width
+        $origH = [int]$srcDim.Height
+        # Второй (уменьшенный) вариант: половина ширины исходника, минимум 320 px
+        $halfW = Get-EvenWidth ([Math]::Max(320, $origW / 2))
+        # По умолчанию наследуем разрешение исходного видеофайла; для нечётной ширины — уменьшаем на 1 px
+        $defaultW = if ($origW % 2 -eq 0) { $origW } else { $origW - 1 }
+    } else {
+        $origW = 0; $origH = 0; $halfW = 320
+        $defaultW = 320
+    }
+    $fps = 15.0
+    $width = [double]$defaultW
+    $reverse = $false
+    $loop = 0.0
+    while ($true) {
+        Show-Banner "GIF SETTINGS"
+        Write-Host "  Input: $([System.IO.Path]::GetFileName($InputFile))" -ForegroundColor Gray
+        if ($origW -gt 0) {
+            Write-Host "  Source resolution: ${origW}x${origH}" -ForegroundColor DarkGray
+        } else {
+            Write-Host "  Source resolution: unavailable (default width 320)" -ForegroundColor DarkYellow
+        }
+        Write-Host "  [1] FPS (frames per second)      : $([int]$fps)" -ForegroundColor White
+        $wStr = if ($width -le 0) { "original" } else { [int]$width }
+        Write-Host "  [2] Width px (height auto)       : $wStr" -ForegroundColor White
+        if ($origW -gt 0) {
+            Write-Host "      [O] Original (${origW})   [H] Half ($halfW)" -ForegroundColor DarkGray
+        } elseif ($halfW -gt 0) {
+            Write-Host "      [H] Reduced width ($halfW)" -ForegroundColor DarkGray
+        }
+        Write-Host "  [3] Reverse playback             : $(if ($reverse) { 'on' } else { 'off' })" -ForegroundColor White
+        $loopStr = if ($loop -le 0) { "infinite" } else { [int]$loop }
+        Write-Host "  [4] Loop count                   : $loopStr" -ForegroundColor White
+        Write-Host "  [S] $('Start conversion')   [0] $('Back')" -ForegroundColor Green
+        $sel = (Read-Host "  Select option").Trim().ToUpper()
+        switch ($sel) {
+            '1' { if (-not (Read-ConvertParam -Name 'FPS' -Hint 'Must be 1..60' -Cur $fps -Min 1 -Max 60 -Out ([ref]$fps))) { } }
+            '2' { if (-not (Read-ConvertParam -Name 'Width px (0 = keep original size)' -Hint 'Must be 0..7680' -Cur $width -Min 0 -Max 7680 -Out ([ref]$width))) { } }
+            'O' { if ($origW -gt 0) { $width = [double]$origW } }
+            'H' { $width = [double]$halfW }
+            '3' { $reverse = -not $reverse }
+            '4' { if (-not (Read-ConvertParam -Name 'Loop count (0 = infinite)' -Hint 'Must be 0..65535' -Cur $loop -Min 0 -Max 65535 -Out ([ref]$loop))) { } }
+            'S' {
+                # Формируем цепочку фильтров и аргументы ffmpeg
+                $vfParts = @("fps=$([int]$fps)")
+                if ($width -gt 0) { $vfParts += "scale=$([int]$width):-1:flags=lanczos" }
+                if ($reverse) { $vfParts += "reverse" }
+                $gifArgs = @("-vf", ($vfParts -join ','), "-loop", "$([int]$loop)")
+                return @{ Ext = "gif"; Args = $gifArgs }
+            }
+            '0' { return $null }
+            default {
+                Write-Host "  [X] $('Invalid choice')" -ForegroundColor Red
+                Start-Sleep -Milliseconds 600
+            }
+        }
+    }
+}
+
 # Основной цикл
 do {
     Show-Banner "MEDIA CONVERTER"
@@ -297,6 +407,12 @@ do {
         Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
         Read-Host
         continue
+    }
+
+    # Видео -> GIF: перед конвертацией предлагаем открыть настройку параметров
+    if ($fileType -eq "Video" -and $target.Ext -eq "gif") {
+        $gifTarget = Show-GifSettings -InputFile $inputFile
+        if ($gifTarget) { $target = $gifTarget } else { continue }
     }
 
     $dir = [System.IO.Path]::GetDirectoryName($inputFile)
