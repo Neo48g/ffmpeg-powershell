@@ -280,13 +280,16 @@ function Invoke-MiscDeepfried {
     if ($lvlRaw -eq '0' -or [string]::IsNullOrWhiteSpace($lvlRaw)) { return }
     $qval = 2          # качество JPEG/GIF-артефактов (mjpeg q:v и GIF b:v = qval*200 kбит/с): 1..31, меньше = сильнее
     $maxbrk = 150      # потолок битрейта видео в кбит/с (-maxrate/-bufsize); 0 = без ограничений
+    # Параметры "жара" (одинаковы для картинок и видео): contrast/saturation/hueShift/bright/gain — цветовой дисторшн;
+    # crf/gop/maxbrk/abr/volDb — только для видео; qval — сила JPEG/GIF-артефактов для картинок
     switch ($lvlRaw) {
-        '1' { $scale = 0.88; $crf = 25; $abr = '124k'; $volDb = 3; $gop = 12 }
-        '2' { $scale = 0.60; $crf = 30; $abr = '86k'; $volDb = 6; $gop = 6 }
-        '3' { $scale = 0.30; $crf = 35; $abr = '42k'; $volDb = 9; $gop = 6 }
+        '1' { $scale = 0.88; $crf = 25; $abr = '124k'; $volDb = 3; $gop = 12; $contrast = 1.18; $saturation = 1.7; $hueShift = -4;  $bright = 0.02; $gain = 1.05 }
+        '2' { $scale = 0.60; $crf = 30; $abr = '86k'; $volDb = 6; $gop = 6;  $contrast = 1.35; $saturation = 2.3; $hueShift = -8;  $bright = 0.05; $gain = 1.12 }
+        '3' { $scale = 0.30; $crf = 35; $abr = '42k'; $volDb = 9; $gop = 6;  $contrast = 1.5;  $saturation = 2.9; $hueShift = -12; $bright = 0.07; $gain = 1.18 }
         '4' {
-            # Пользовательские значения: по умолчанию берём Medium, дальше каждое поле можно переписать (Enter = оставить)
+            # Пользовательские значения: по умолчанию берём Strong, дальше каждое поле можно переписать (Enter = оставить)
             $scale = 0.20; $crf = 36; $abr = '48k'; $volDb = 9; $gop = 6
+            $contrast = 1.55; $saturation = 3.0; $hueShift = -12; $bright = 0.07; $gain = 1.2
             Write-Host "`n  $('Custom values:') (Enter = keep, 0 = cancel)" -ForegroundColor Cyan
             $v = 0.0
             if (-not (Read-CustomParam -Name 'Scale factor (0.05..0.95, lower = more pixelated)' -Hint 'Must be 0.05..0.95' -Cur $scale -Min 0.05 -Max 0.95 -Out ([ref]$v))) { return }
@@ -309,8 +312,23 @@ function Invoke-MiscDeepfried {
             $v = 0.0
             if (-not (Read-CustomParam -Name 'Video max bitrate kbps (0 = unlimited)' -Hint 'Must be 0..5000' -Cur $maxbrk -Min 0 -Max 5000 -Out ([ref]$v))) { return }
             $maxbrk = [int][Math]::Round($v)
+            $v = 0.0
+            if (-not (Read-CustomParam -Name 'Fry contrast (1.0..2.0, higher = harsher)' -Hint 'Must be 1.0..2.0' -Cur $contrast -Min 1.0 -Max 2.0 -Out ([ref]$v))) { return }
+            $contrast = $v
+            $v = 0.0
+            if (-not (Read-CustomParam -Name 'Fry saturation (1.0..4.0, higher = more acid)' -Hint 'Must be 1.0..4.0' -Cur $saturation -Min 1.0 -Max 4.0 -Out ([ref]$v))) { return }
+            $saturation = $v
+            $v = 0.0
+            if (-not (Read-CustomParam -Name 'Fry hue shift degrees (-90..90)' -Hint 'Must be -90..90' -Cur $hueShift -Min -90 -Max 90 -Out ([ref]$v))) { return }
+            $hueShift = $v
+            $v = 0.0
+            if (-not (Read-CustomParam -Name 'Fry brightness (-0.3..0.3)' -Hint 'Must be -0.3..0.3' -Cur $bright -Min -0.3 -Max 0.3 -Out ([ref]$v))) { return }
+            $bright = $v
+            $v = 0.0
+            if (-not (Read-CustomParam -Name 'Fry white point gain (1.0..1.6, blown highlights)' -Hint 'Must be 1.0..1.6' -Cur $gain -Min 1.0 -Max 1.6 -Out ([ref]$v))) { return }
+            $gain = $v
         }
-        default { $scale = 0.20; $crf = 36; $abr = '48k'; $volDb = 9; $gop = 6 }
+        default { $scale = 0.20; $crf = 36; $abr = '48k'; $volDb = 9; $gop = 6; $contrast = 1.55; $saturation = 3.0; $hueShift = -12; $bright = 0.07; $gain = 1.2 }
     }
 
     Write-Host "`n  $('Processing...')" -ForegroundColor Yellow
@@ -331,17 +349,21 @@ function Invoke-MiscDeepfried {
     } else {
         $vfDown = "scale=trunc(iw*${scale}/2)*2:trunc(ih*${scale}/2)*2:flags=neighbor,scale=${tgtW}:${tgtH}:flags=neighbor"
     }
+    # Цветовой дисторшн "жара" — одинаковые приёмы для картинок и видео:
+    # перекос контраста/насыщенности, сдвиг оттенка в кислотную сторону, экстремальные точки кривых (выбитые света) и резкость
+    $curveMaster = "0/0 0.25/$([Math]::Round(0.25 * $gain, 3)) 0.5/0.56 0.75/$([Math]::Round(0.93 - 0.18 * $gain, 3)) 1/1"
+    $vfFry = "eq=contrast=${contrast}:brightness=${bright}:saturation=${saturation},hue=h=${hueShift},curves=master='${curveMaster}',unsharp=5:5:1.2:5:5:0"
 
     if ($isImage) {
-        # GIF сохраняем анимированным (деградация через пиксельизацию + низкий битрейт);
-        # остальные картинки — JPEG-артефакты через mjpeg q:v 2, если исходник не PNG;
+        # GIF сохраняем анимированным (деградация через пиксельизацию + цветовой жар + низкий битрейт);
+        # остальные картинки — JPEG-артефакты через mjpeg q:v, если исходник не PNG;
         # для PNG делаем два прохода: деградированный JPEG во временном файле -> пересборка в PNG (формат сохраняется)
         $outExt = if ($ext -eq '.gif') { '.gif' } elseif ($ext -in @('.jpg','.jpeg')) { '.jpg' } else { $ext }
         $out = Join-Path $outDir "$base`_deepfry$outExt"
         $logFile2 = Join-Path $TempDir "ffmpeg_misc_deep2.txt"
         $tmpJpg = Join-Path $TempDir "ffmpeg_misc_deep_tmp.jpg"
         # -frames:v 1 — берём только первый кадр (для статичных картинок; GIF обрабатывается целиком ниже)
-        $FFArgs = @("-hide_banner","-loglevel","error","-y","-i",$inPath,"-vf","${vfDown},setsar=1")
+        $FFArgs = @("-hide_banner","-loglevel","error","-y","-i",$inPath,"-vf","${vfDown},${vfFry},setsar=1")
         if ($ext -eq '.gif') {
             $FFArgs += @("-loop","0","-b:v","$([int]$qval * 200)k")
             $code = Invoke-FFmpegJob -Exe $ff -FFArgs $FFArgs -LogFile $logFile
@@ -370,8 +392,9 @@ function Invoke-MiscDeepfried {
         # Перегруз звука: умеренная громкость с клиппингом лимитером + компрессор (без запредельного дисторшна)
         $volBoost2 = [double]$volDb + 3
         $afOver = "volume=${volDb}dB:precision=fixed,alimiter=limit=0.7:attack=5:release=50,acompressor=threshold=0.05:ratio=8:attack=5:release=50,volume=${volBoost2}dB,alimiter=limit=0.95:attack=5:release=50"
+        # Видео: пиксельизация + тот же цветовой жар, что и для картинок ($vfFry)
         $FFArgs = @("-hide_banner","-loglevel","error","-y","-i",$inPath,
-            "-vf","${vfDown},setsar=1,format=yuv420p",
+            "-vf","${vfDown},${vfFry},setsar=1,format=yuv420p",
             "-c:v","libx264","-preset","fast","-crf","$crf",
             "-g","$gop","-keyint_min","$gop")
         if ($maxbrk -gt 0) {
