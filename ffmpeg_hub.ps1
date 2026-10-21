@@ -519,7 +519,7 @@ do {
     Write-Host "  [2] $('Media Conversion')" -ForegroundColor White
     Write-Host "  [3] $('Video Trimming')" -ForegroundColor White
     Write-Host "  [4] $('Download (yt-dlp)')" -ForegroundColor White
-    Write-Host "  [5] $('Misc Effects (B&W, audio, wobble)')" -ForegroundColor Magenta
+    Write-Host "  [5] $('Misc Effects')" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [6] $('Manage Dependencies')" -ForegroundColor Cyan
     Write-Host "  [7] $('Global Settings')" -ForegroundColor Cyan
