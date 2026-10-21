@@ -424,6 +424,7 @@ function Get-MissingDependencies {
             if (-not (Get-ToolPath "yt-dlp"))  { $missing += "yt-dlp" }
             if (-not (Get-ToolPath "ffmpeg")) { $missing += "FFmpeg" }
         }
+        '5' { if (-not (Get-ToolPath "ffmpeg")) { $missing += "FFmpeg" } }
     }
     return $missing
 }
@@ -509,6 +510,7 @@ $scripts = @{
     '2' = "convert-media.ps1"
     '3' = "trim-video.ps1"
     '4' = "yt-dlp-menu.ps1"
+    '5' = "misc-effects.ps1"
 }
 
 do {
@@ -517,10 +519,11 @@ do {
     Write-Host "  [2] $('Media Conversion')" -ForegroundColor White
     Write-Host "  [3] $('Video Trimming')" -ForegroundColor White
     Write-Host "  [4] $('Download (yt-dlp)')" -ForegroundColor White
+    Write-Host "  [5] $('Misc Effects (B&W, audio, wobble)')" -ForegroundColor Magenta
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  [5] $('Manage Dependencies')" -ForegroundColor Cyan
-    Write-Host "  [6] $('Global Settings')" -ForegroundColor Cyan
-    Write-Host "  [7] $('Help & Guide')" -ForegroundColor Cyan
+    Write-Host "  [6] $('Manage Dependencies')" -ForegroundColor Cyan
+    Write-Host "  [7] $('Global Settings')" -ForegroundColor Cyan
+    Write-Host "  [8] $('Help & Guide')" -ForegroundColor Cyan
     Write-Host "  [0] $('Exit')" -ForegroundColor Red
 
     $choice = Read-Host "`n  $('Enter choice')"
@@ -533,9 +536,9 @@ do {
         else { Write-Host "`n  [!] $('Script not found'): $path" -ForegroundColor Red; Start-Sleep 2 }
     } else {
         switch ($choice) {
-            '5' { Show-DependenciesMenu }
-            '6' { Show-SettingsMenu }
-            '7' { Show-Guide }
+            '6' { Show-DependenciesMenu }
+            '7' { Show-SettingsMenu }
+            '8' { Show-Guide }
             '0' { exit }
             default { Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red; Start-Sleep 1 }
         }
