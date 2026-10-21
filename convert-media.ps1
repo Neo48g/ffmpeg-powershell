@@ -299,8 +299,8 @@ do {
     $dir = [System.IO.Path]::GetDirectoryName($inputFile)
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($inputFile)
 
-    # Папка результата под вид операции: ...\converted
-    $outDir = Join-Path $dir "converted"
+    # Папка результата создаётся в корневой папке программы: $ScriptDir\converted
+    $outDir = Join-Path $ScriptDir "converted"
     if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
     $outPath = Join-Path $outDir "$baseName`_converted.$($target.Ext)"
 

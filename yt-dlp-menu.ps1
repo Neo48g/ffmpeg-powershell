@@ -313,7 +313,7 @@ do {
         $downloadArgs = @()
         $statusMsg = "Downloading..."
 
-        # Папка загрузки под вид операции: ...\downloaded
+        # Папка загрузки создаётся в корневой папке программы: $ScriptDir\downloaded
         $dlDir = Join-Path $ScriptDir "downloaded"
         if (-not (Test-Path $dlDir)) { New-Item -ItemType Directory -Path $dlDir -Force | Out-Null }
         $commonArgs = @("-P", $dlDir, "--restrict-filenames")
