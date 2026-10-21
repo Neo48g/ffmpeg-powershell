@@ -92,9 +92,12 @@ function Invoke-MiscGrayscale {
         if ($ext -eq '.png') { $FFArgs += @("-compression_level","9") }
         $FFArgs += $out
     } else {
+        # Аудио перекодируется в AAC: "-c:a copy" несовместим с MP4 для PCM-дорожек (alac/pcm из MOV)
         $out = Join-Path $outDir "$base`_gray.mp4"
-        $FFArgs = @("-hide_banner","-loglevel","error","-y","-i",$inPath,"-vf","hue=s=0","-c:v","libx264","-preset","medium","-crf","20")
-        if ($audMode -eq '2') { $FFArgs += @("-an") } else { $FFArgs += @("-c:a","copy") }
+        $FFArgs = @("-hide_banner","-loglevel","error","-y","-i",$inPath,
+            "-vf","scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,hue=s=0,format=yuv420p",
+            "-c:v","libx264","-preset","medium","-crf","20","-pix_fmt","yuv420p",
+            "-c:a","aac","-b:a","192k")
         $FFArgs += $out
     }
 
@@ -196,83 +199,18 @@ function Invoke-MiscRemoveAudio {
     Read-Host
 }
 
-# --- 3. Шакалитие видео (комичный эффект) ---
-function Invoke-MiscWobble {
-    $ff = Get-FFmpegPath
-    if (-not $ff) { Write-Host "  [X] $('FFmpeg not found')" -ForegroundColor Red; Read-Host; return }
-
-    $inPath = Ask-InputFile -Prompt "  $('Enter input video path: (drag the file into the window), or 0 to return:')" -AllowedExt $VideoExt
-    if ($inPath -eq $false) { return }; if (-not $inPath) { return }
-
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($inPath)
-    $outDir = Join-Path $ScriptDir "misc"
-    if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
-    $out = Join-Path $outDir "$base`_wobble.mp4"
-
-    Write-Host "`n  $('Effect intensity:')" -ForegroundColor White
-    Write-Host "  [1] $('Soft')  [2] $('Medium')  [3] $('Crazy (max comedy)')  [0] $('Back')" -ForegroundColor White
-    $lvl = Read-Host "  $('Intensity')"
-    switch ($lvl) {
-        '1' { $ampX = 6;  $ampY = 4; $freq = 0.8 }
-        '2' { $ampX = 12; $ampY = 8; $freq = 1.5 }
-        '3' { $ampX = 25; $ampY = 15; $freq = 3 }
-        default { return }
-    }
-
-    # "Зашкал" = синусоидальное смещение пикселей (displace) + лёгкая резкость = комичный эффект дрожащего видео
-    $logFile = Join-Path $TempDir "ffmpeg_misc_wobble.txt"
-    $pi8 = [math]::Round([math]::PI/8, 4)     # шаг фазы по кадрам (N)
-    $wfreq = [math]::Round($freq*2, 2)        # скорость покачивания по времени (T)
-    $fc = "[0:v]split=3[base][mx][my];" +
-          "[mx]format=gray,geq=lum='128+{0}*sin(N*{1}+T*{2}+X*0.05)'[dx];" +
-          "[my]format=gray,geq=lum='128+{3}*cos(N*{1}-T*{2}+Y*0.05)'[dy];" +
-          "[base][dx][dy]displace=edge=smear[v]" -f $ampX, $pi8, $wfreq, $ampY
-    $FFArgs = @(
-        "-hide_banner","-loglevel","error","-y",
-        "-i", $inPath,
-        "-filter_complex", $fc,
-        "-map","[v]","-map","0:a?",
-        "-c:v","libx264","-preset","fast","-crf","21","-c:a","copy",
-        $out
-    )
-
-    Write-Host "`n  $('Processing...')" -ForegroundColor Yellow
-    $code = Invoke-FFmpegJob -Exe $ff -FFArgs $FFArgs -LogFile $logFile
-    if ($code -ne 0 -or -not (Test-Path $out)) {
-        # Резервный вариант: покачивание всего кадра (rotate), если displace недоступен
-        $rotAmp = [math]::Round($ampX/60.0, 4)
-        $FFArgs = @(
-            "-hide_banner","-loglevel","error","-y","-i",$inPath,
-            "-vf",("rotate='{0}*sin(2*PI*{1}*t)':fillcolor=black:ow='hypot(iw,ih)':oh=ow" -f $rotAmp, $freq),
-            "-c:v","libx264","-preset","fast","-crf","21","-c:a","copy",
-            $out
-        )
-        $code = Invoke-FFmpegJob -Exe $ff -FFArgs $FFArgs -LogFile $logFile
-    }
-    if ($code -eq 0 -and (Test-Path $out)) { Write-Host "  [OK] $('Saved'): $out" -ForegroundColor Green }
-    else {
-        Write-Host "  [X] $('Error')" -ForegroundColor Red
-        Save-JobLog -BaseName $base -LogFile $logFile
-        Get-Content $logFile -Tail 8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-    }
-    Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
-    Read-Host
-}
-
 # --- Меню Misc ---
 do {
     Show-Banner "MISC EFFECTS"
     Write-Host "  [1] $('Black & White (photo/video)')" -ForegroundColor White
     Write-Host "  [2] $('Extract audio from video')" -ForegroundColor White
     Write-Host "  [3] $('Remove audio from video')" -ForegroundColor White
-    Write-Host "  [4] $('Wobble video (comedy effect)')" -ForegroundColor White
     Write-Host "`n  [0] $('Back to Hub')" -ForegroundColor Red
     $choice = Read-Host "  $('Enter choice')"
     switch ($choice) {
         '1' { Invoke-MiscGrayscale }
         '2' { Invoke-MiscExtractAudio }
         '3' { Invoke-MiscRemoveAudio }
-        '4' { Invoke-MiscWobble }
         '0' { return }
         default { Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red; Start-Sleep 1 }
     }
