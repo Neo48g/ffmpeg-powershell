@@ -109,10 +109,40 @@ $script:LogsFolder = [string]$global:Cfg.LogsFolder
 $script:ErrorLogFile = Join-Path $script:LogsFolder "compression_errors.log"
 $script:NoProgressTimeoutSec = 300     # секунд без прогресса => процесс считается зависшим
 # $script:MaxRuntimeSec = 7200          # максимальное время обработки одного файла (сек)
+$script:SlowFrameWarnRatio = 5         # предупреждение, если на обработку 1 секунды видео уходит более N секунд реального времени
 
-# Значения можно переопределить в global_config.json: NoProgressTimeoutSec / MaxRuntimeSec
+# Значения можно переопределить в global_config.json: NoProgressTimeoutSec / MaxRuntimeSec / SlowFrameWarnRatio
 if ($null -ne $global:Cfg.NoProgressTimeoutSec) { $script:NoProgressTimeoutSec = [int]$global:Cfg.NoProgressTimeoutSec }
 if ($null -ne $global:Cfg.MaxRuntimeSec)        { $script:MaxRuntimeSec = [int]$global:Cfg.MaxRuntimeSec }
+if ($null -ne $global:Cfg.SlowFrameWarnRatio)   { $script:SlowFrameWarnRatio = [double]$global:Cfg.SlowFrameWarnRatio }
+
+# --- Предупреждение о медленной обработке кадров ---
+# Сравнивает реальное прошедшее время с временем, обработанным ffmpeg (time= из лога).
+# Если на обработку 1 секунды видео уходит больше $script:SlowFrameWarnRatio секунд — выводит предупреждение (один раз за цикл).
+# Вызов: Warn-IfSlowProcessing -ElapsedSec <сек_истекло> -ProcessedVideoSec <сек_видео_обработано> -Ref $state [-Stage "..."]
+# $state — хэш-таблица { LastWarnAt = [TimeSpan]::Zero }, передаётся по ссылке и запоминает момент последнего предупреждения.
+function Warn-IfSlowProcessing {
+    param(
+        [double]$ElapsedSec,
+        [double]$ProcessedVideoSec,
+        [hashtable]$Ref,
+        [string]$Stage = "Compress"
+    )
+    if ($null -eq $Ref) { return }
+    $ratio = $script:SlowFrameWarnRatio
+    if ($ratio -le 0) { return }                      # предупреждения отключены
+    if ($ElapsedSec -le 60) { return }                # слишком малая выборка — не предупреждаем
+    if ($ProcessedVideoSec -le 0) { return }          # ещё нет данных о прогрессе
+    $actualRatio = $ElapsedSec / $ProcessedVideoSec   # секунд реального времени на 1 секунду видео
+    if ($actualRatio -gt $ratio) {
+        $now = [DateTime]::Now
+        if (($now - $Ref.LastWarnAt).TotalSeconds -ge 60) {   # не чаще одного раза в минуту
+            $Ref.LastWarnAt = $now
+            Write-Host "`n  [!] $('Warning: slow frame processing')! $('Real time per video second'): $([math]::Round($actualRatio, 1))$(' s'). $('Threshold'): $([double]$ratio)$(' s'). $('Consider a faster preset/hardware encoding') ($Stage)" -ForegroundColor Yellow
+            Write-ErrorLog -Type "INFO" -FileName "" -Details ("Stage: $Stage | Slow frame processing | Elapsed: $([math]::Round($ElapsedSec,1)) s | Processed video: $([math]::Round($ProcessedVideoSec,1)) s | Ratio: $([math]::Round($actualRatio, 2)) x") | Out-Null
+        }
+    }
+}
 
 # --- Сжатие до целевого размера файла (двухпроходное кодирование по битрейту) ---
 # Возвращает строку аргументов ffmpeg для одного прохода; $PassNum = 1 или 2.
@@ -155,6 +185,7 @@ function Invoke-TwoPassToTargetSize {
 
         $lastTime = -1.0; $lastLogSize = 0; $lastOutSize = 0; $lastProgressAt = $swAll.Elapsed
         $hung = $false
+        $slowWarnState = @{ LastWarnAt = [DateTime]::MinValue }   # состояние предупреждения о медленных кадрах (two-pass)
         while (-not $proc.HasExited) {
             $currentTime = 0
             if (Test-Path $logFile) {
@@ -174,6 +205,7 @@ function Invoke-TwoPassToTargetSize {
 
             $script:LastProgressInfo.CurrentTime = $currentTime
             $script:LastProgressInfo.Percent = $percent
+            Warn-IfSlowProcessing -ElapsedSec $swAll.Elapsed.TotalSeconds -ProcessedVideoSec $currentTime -Ref $slowWarnState -Stage "Two-pass compression, pass $pass"
             if (Test-LoggingHotkey) {
                 $res = Write-ProgressLog -FileName $SrcPath -Stage "CompressPass$pass" -Iteration $pass `
                     -CurrentCRF $videoTotalK -ElapsedSec $swAll.Elapsed.TotalSeconds -LogFile $logFile `
@@ -592,6 +624,7 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
                     # --- Анти-зависание: отслеживаем прогресс и время работы ---
                     $lastTime = -1.0; $lastLogSize = 0; $lastOutSize = 0; $lastProgressAt = $sw.Elapsed
                     $hung = $false
+                    $slowWarnState = @{ LastWarnAt = [DateTime]::MinValue }   # состояние предупреждения о медленных кадрах
                     while (-not $proc.HasExited) {
                         $currentTime = 0
                         if (Test-Path $logFile) {
@@ -617,6 +650,9 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
                         # Запоминаем текущий прогресс для записи лога по нажатию клавиши "L"
                         $script:LastProgressInfo.CurrentTime = $currentTime
                         $script:LastProgressInfo.Percent = $percent
+
+                        # Предупреждение, если на кадры тратится слишком много времени
+                        Warn-IfSlowProcessing -ElapsedSec $sw.Elapsed.TotalSeconds -ProcessedVideoSec $currentTime -Ref $slowWarnState -Stage "Compress (CRF $currentCRF)"
 
                         # Лог по нажатию клавиши: [L] — записать текущее состояние процесса в корневой лог
                         if (Test-LoggingHotkey) {
@@ -696,6 +732,7 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
                         # Анти-зависание для расчёта VMAF
                         $vmafLastTime = -1.0; $vmafLastLogSize = 0; $vmafLastProgressAt = $vmafSw.Elapsed
                         $vmafHung = $false
+                        $vmafSlowWarnState = @{ LastWarnAt = [DateTime]::MinValue }   # состояние предупреждения о медленных кадрах (VMAF)
                         while (-not $vmafProc.HasExited) {
                             $vmafTime = 0
                             if (Test-Path $vmafLog) {
@@ -717,6 +754,9 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
                             # Запоминаем текущий прогресс для записи лога по нажатию клавиши "L"
                             $script:LastProgressInfo.CurrentTime = $vmafTime
                             $script:LastProgressInfo.Percent = $vmafPercent
+
+                            # Предупреждение, если на кадры тратится слишком много времени
+                            Warn-IfSlowProcessing -ElapsedSec $vmafSw.Elapsed.TotalSeconds -ProcessedVideoSec $vmafTime -Ref $vmafSlowWarnState -Stage "VMAF"
 
                             # Лог по нажатию клавиши: [L] — записать текущее состояние процесса VMAF в корневой лог
                             if (Test-LoggingHotkey) {
