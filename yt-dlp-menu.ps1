@@ -222,6 +222,146 @@ function Select-VideoQuality {
     }
 }
 
+# --- Скачивание картинок по URL ---
+# Поддерживает: прямые ссылки на изображения, страницы с превью (через yt-dlp),
+# несколько URL через запятку/пробел и пакетную загрузку списка URL из файла (.txt)
+function Invoke-ImageDownload {
+    param([string[]]$Urls, [string]$OutputDir, [string[]]$AuthArgs)
+
+    $imageExts = @('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'tif', 'svg', 'ico', 'heic', 'avif')
+    $okCount = 0; $failCount = 0
+
+    # Пути cookies могут содержать пробелы и скобки ("... (1).txt") — снимаем обрамляющие кавычки,
+    # чтобы yt-dlp не получал битый путь (--cookies C:\...\www.youtube.com_cookies (1).txt)
+    $AuthArgs = @($AuthArgs | ForEach-Object { if ($_ -is [string]) { $_.Trim().Trim('"').Trim("'") } else { $_ } })
+
+    foreach ($u in $Urls) {
+        if ([string]::IsNullOrWhiteSpace($u)) { continue }
+        # Очистка от кавычек и «хвостов» склеенной вставки; URL не должен содержать пробелов и кавычек
+        $u = $u.Trim().Trim('"').Trim("'")
+        if ($u -notmatch '^https?://[^\s""'']+$') {
+            Write-Host "  [X] $('Invalid URL'): $u" -ForegroundColor Red
+            $failCount++
+            continue
+        }
+
+        # Прямая ссылка на файл-картинку: расширение ищем в конце URL или перед query-строкой (?...)
+        # (ссылки DeviantArt и подобных CDN имеют вид ...jpg?token=<очень длинный JWT>)
+        $uPath = ($u -split '\?')[0]
+        # -imatch: расширение в URL может быть в верхнем регистре (.JPG, .PNG)
+        if ($u -match '^https?://' -and $uPath -imatch "\.($($imageExts -join '|'))$") {
+            if (-not (Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
+            try {
+                $uriObj = [System.Uri]::new($u)
+                # Имя файла берём из ПУТИ URL (до ?token=...), иначе в имя попадёт вся query-строка
+                $fileName = ($uriObj.AbsolutePath.Split('/')[-1] -replace '/', '')
+                # Если в пути нет имени файла — пробуем взять имя из query (filename=..., name=...)
+                if ([string]::IsNullOrWhiteSpace([System.Uri]::UnescapeDataString($fileName))) {
+                    $qs = [regex]::Matches($uriObj.Query, '(?:^|[&?])(?:filename|name)=([^&]+)')
+                    if ($qs.Count -gt 0) { $fileName = $qs[0].Groups[1].Value }
+                }
+                # Раскодировка %XX в имени файла без внешних зависимостей
+                $baseName = [regex]::Replace($fileName, '%([0-9A-Fa-f]{2})', { param($m) [char][Convert]::ToInt32($m.Groups[1].Value, 16) })
+                if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = "image_$((Get-Date -Format 'yyyyMMddHHmmss')).jpg" }
+                $baseName = ($baseName -replace '[^\w\.\-]', '_')
+                $destPath = Join-Path $OutputDir $baseName
+
+                # Если файл уже существует — добавляем суффикс (1), (2), ...
+                if (Test-Path $destPath) {
+                    $stem = [System.IO.Path]::GetFileNameWithoutExtension($baseName)
+                    $ext  = [System.IO.Path]::GetExtension($baseName)
+                    $n = 1
+                    while (Test-Path $destPath) { $destPath = Join-Path $OutputDir "$stem`_$n$ext"; $n++ }
+                }
+
+                Write-Host "  $('Downloading image')... $u" -ForegroundColor Cyan
+                $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+                $got = $false
+                try {
+                    # WebClient на старых PS может не поддерживать TLS1.2 — включаем принудительно
+                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                    $wc = New-Object System.Net.WebClient
+                    $wc.Headers.Add('User-Agent', $ua)
+                    $wc.Headers.Add('Referer', "$($uriObj.Scheme)://$($uriObj.Host)/")
+                    $wc.DownloadFile($u, $destPath)
+                    $got = $true
+                } catch {
+                    $wcErr = $_.Exception.Message
+                }
+                if (-not $got) {
+                    # Резервный способ: Invoke-WebRequest (в PS 5.1 отключает «прогресс», чтобы не тормозить)
+                    $ProgressPreference = 'SilentlyContinue'
+                    Invoke-WebRequest -Uri $u -OutFile $destPath -UserAgent $ua -Headers @{ Referer = "$($uriObj.Scheme)://$($uriObj.Host)/" } -UseBasicParsing -ErrorAction Stop
+                    Write-Host "  $('WebClient failed, used Invoke-WebRequest'): $wcErr" -ForegroundColor DarkGray
+                }
+                # Проверка, что скачался именно файл, а не страница ошибки / заглушка
+                $head = @(Get-Content -Path $destPath -Encoding Byte -TotalCount 16 -ErrorAction SilentlyContinue)
+                if ($head.Count -eq 0) { throw "Downloaded file is empty." }
+                $asText = -join ($head | ForEach-Object { [char]$_ })
+                $imgMagic = ($head[0] -eq 0xFF -or $head[0] -eq 0x89 -or ($head[0] -eq 0x47 -and $head[1] -eq 0x49) -or
+                              ($head[0] -eq 0x52 -and $head[1] -eq 0x49 -and $head[2] -eq 0x46 -and $head[3] -eq 0x46) -or
+                              ($head[0] -eq 0x42 -and $head[1] -eq 0x4D) -or ($asText -match '^<svg') -or ($asText -match '^(RIFF|BM)'))
+                if ((Get-Item $destPath).Length -lt 100 -or (-not $imgMagic)) {
+                    throw "Server did not return a valid image (HTML/error page or empty file). The link may be expired (check the token) or may require cookies."
+                }
+                $sizeBytes = (Get-Item $destPath).Length
+                $sizeStr = if ($sizeBytes -ge 1MB) { "{0:N2} MB" -f ($sizeBytes / 1MB) } else { "{0:N2} KB" -f ($sizeBytes / 1KB) }
+                Write-Host "  [OK] $destPath ($sizeStr)" -ForegroundColor Green
+                $okCount++
+            } catch {
+                # Удаляем неполный/мусорный файл и пишем реальную причину ошибки
+                if (Test-Path $destPath) { Remove-Item $destPath -Force -ErrorAction SilentlyContinue }
+                $errMsg = $_.Exception.Message
+                if ($_ -is [System.Management.Automation.ErrorRecord] -and $_.Exception.Response) {
+                    try { $errMsg += " (HTTP $([int]$_.Exception.Response.StatusCode))" } catch {}
+                }
+                Write-Host "  [X] $('Failed to download'): $errMsg" -ForegroundColor Red
+                Write-ErrorLog -Type "ERROR" -FileName $u -Details "Stage: Direct image download failed | Error: $errMsg" | Out-Null
+                $failCount++
+            }
+            continue
+        }
+
+        # Ссылка на страницу/пост (VK, Instagram, Pinterest и т.п.) или неизвестный тип —
+        # передаём yt-dlp: он скачает превью/изображения со страниц, поддерживающих его экстракторы
+        if ($u -match '^https?://') {
+            Write-Host "  $('Trying yt-dlp image extraction')... $u" -ForegroundColor Cyan
+            # ВАЖНО: параметры и URL разделяются знаком "--", иначе длинная ссылка (с токеном)
+            # может быть воспринята неверно и yt-dlp выдаст "You must provide at least one URL"
+            # Пустые элементы удаляем (иначе PowerShell склеит аргументы — та же ошибка "You must provide at least one URL")
+            $AuthArgs = @($AuthArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            $imgArgs = $AuthArgs + @("-P", $OutputDir, "--restrict-filenames",
+                "--write-image", "--skip-download", "--no-playlist", "--ignore-no-formats-error", "--no-colors", "--", $u)
+            $imgOutput = @()
+            & $ytdlpCmd @imgArgs 2>&1 | ForEach-Object {
+                $line = $_.ToString()
+                $imgOutput += $line
+                if ($line -match 'ERROR|failed|refused|403') { Write-Host $line -ForegroundColor Red }
+                elseif ($line -match 'WARNING') { Write-Host $line -ForegroundColor Yellow }
+                elseif ($line -match 'Writing video thumbnail|Destination|^ *\[') { Write-Host $line -ForegroundColor Green }
+                else { Write-Host $line -ForegroundColor White }
+            }
+            # Код возврата проверяем ТОЛЬКО если yt-dlp вообще отработал (иначе это leftover-код от прошлой команды)
+            $ytdlpRan = ($imgOutput.Count -gt 0)
+            if ($ytdlpRan -and $LASTEXITCODE -eq 0) { $okCount++ }
+            else {
+                if (-not $ytdlpRan) { Write-Host "  [!] $('yt-dlp did not run for this URL') ($ytdlpCmd)" -ForegroundColor Yellow }
+                Write-Host "  [X] $('yt-dlp could not extract an image from this URL')" -ForegroundColor Red
+                $lastLines = ($imgOutput | Select-Object -Last 6) -join "`n"
+                Write-ErrorLog -Type "ERROR" -FileName $u -Details ("Stage: yt-dlp image extraction failed | ContentChoice: 6 | ExitCode: $LASTEXITCODE`nCommand: $ytdlpCmd " + ($imgArgs -join ' ') + "`nLast yt-dlp output:`n$lastLines") | Out-Null
+                $failCount++
+            }
+            continue
+        }
+
+        Write-Host "  [X] $('Invalid URL'): $u" -ForegroundColor Red
+        $failCount++
+    }
+
+    Write-Host "`n  $('Result'): OK - $okCount, $('Failed') - $failCount" -ForegroundColor $(if ($failCount -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "  $('Saved to'): $OutputDir" -ForegroundColor Cyan
+}
+
 # --- Главный цикл ---
 do {
     Show-Banner "YT-DLP DOWNLOADER"
@@ -269,7 +409,7 @@ do {
                 Write-Host "`n  $('Enter path to cookies.txt: (drag in window)')" -ForegroundColor White
             }
 
-            $inputPath = (Read-Host "  > ").Trim().Trim('"')
+            $inputPath = (Read-Host "  > ").Trim().Trim('"').Trim("'")
 
             if ([string]::IsNullOrWhiteSpace($inputPath)) {
                 $cookiePath = $defaultPath
@@ -300,18 +440,25 @@ do {
         Write-Host "  [3] $('Playlist')" -ForegroundColor White
         Write-Host "  [4] $('Video Fragment (by timecode)')" -ForegroundColor White
         Write-Host "  [5] $('Audio Fragment (by timecode)')" -ForegroundColor White
+        Write-Host "  [6] $('Picture / Image by URL')" -ForegroundColor White
         Write-Host "  [0] $('Back to previous menu')" -ForegroundColor Red
 
         $contentChoice = Read-Host "  Choice"
         if ($contentChoice -eq '0') { continue }
-        if ($contentChoice -notmatch '^[1-5]$') {
+        if ($contentChoice -notmatch '^[1-6]$') {
             Write-Host "`n  [!] $('Invalid choice')" -ForegroundColor Red
             Start-Sleep 1
             continue
         }
 
-        Write-Host "`n  $('Enter URL:')" -ForegroundColor White
-        $url = Read-Host "  > "
+        # Для картинок [6] список вводится отдельным шагом ниже — здесь URL не запрашиваем,
+        # иначе пользовательская вставка «склеивается» (URL + путь cookies) и попадает в yt-dlp битой
+        if ($contentChoice -ne '6') {
+            Write-Host "`n  $('Enter URL:')" -ForegroundColor White
+            $url = Read-Host "  > "
+        } else {
+            $url = ""
+        }
 
         $downloadArgs = @()
         $statusMsg = "Downloading..."
@@ -353,6 +500,62 @@ do {
                 $downloadArgs = @("-x", "--audio-format", "mp3", "--download-sections", $section, $url)
                 $statusMsg = "Downloading audio fragment..."
             }
+            '6' {
+                # Скачивание картинок по URL — обрабатывается отдельно (без yt-dlp-конвейера видео)
+                Write-Host "`n  $('You can enter several URLs separated by a comma, or a path to a .txt file with a list of URLs (one per line):')" -ForegroundColor Gray
+                $imgInput = Read-Host "  > "
+
+                $imageUrls = @()
+
+                # 1) Извлекаем ВСЕ http(s)-ссылки из строки ввода. Регулярка останавливается на пробеле,
+                #    запятой и кавычке — это защищает от «склеенных» вставок вида:
+                #    https://...jpg?token=...""C:\Users\...\www.youtube.com_cookies (1).txt"
+                $httpMatches = [regex]::Matches($imgInput, 'https?://[^\s,""'']+')
+                if ($httpMatches.Count -gt 0) {
+                    $imageUrls = @($httpMatches | ForEach-Object { $_.Value.TrimEnd(',', ';') })
+                } else {
+                    # 2) Введён путь к файлу со списком URL? Снимаем артефакты перетаскивания:
+                    #    двойные кавычки (""...""), ведущие обратные слэши, обрамляющие кавычки.
+                    $imgInput = $imgInput -replace '""+', '"'
+                    $imgInput = $imgInput.Trim().Trim('"').Trim("'").TrimStart('\').Trim().Trim('"').Trim("'")
+                    if ($imgInput -and (Test-Path $imgInput -ErrorAction SilentlyContinue)) {
+                        Write-Host "  $('Reading URL list from file')..." -ForegroundColor Cyan
+                        foreach ($line in (Get-Content $imgInput)) {
+                            # В файле тоже возможна склейка — берём только http(s)-части строк
+                            foreach ($m in [regex]::Matches($line, 'https?://[^\s,""'']+')) {
+                                $imageUrls += $m.Value.TrimEnd(',', ';')
+                            }
+                        }
+                    }
+                }
+
+                if (@($imageUrls).Count -eq 0) {
+                    Write-Host "  [X] $('No valid URLs entered')" -ForegroundColor Red
+                    Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
+                    Read-Host
+                    continue
+                }
+
+                $imgDir = Join-Path $dlDir "images"
+                if (-not (Test-Path $imgDir)) { New-Item -ItemType Directory -Path $imgDir -Force | Out-Null }
+
+                Write-ErrorLog -Type "INFO" -FileName ($imageUrls -join ', ') -Details "Image download started | Count: $(@($imageUrls).Count) | Output folder: $imgDir" | Out-Null
+
+                Invoke-ImageDownload -Urls $imageUrls -OutputDir $imgDir -AuthArgs $authArgs
+
+                Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
+                Read-Host
+                continue
+            }
+        }
+
+        # Защита от пустого/битого ввода в основном конвейере: без корректного URL yt-dlp
+        # вызывался без адреса и падал с "You must provide at least one URL" (ExitCode 2)
+        if ($url -notmatch '^https?://') {
+            Write-Host "`n  [X] $('Invalid URL. Please enter a link starting with http:// or https://')" -ForegroundColor Red
+            Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
+            Read-Host
+            continue
         }
 
         Write-Host "`n  $statusMsg" -ForegroundColor Yellow
@@ -362,6 +565,15 @@ do {
         # Пишем в корневой лог начало каждой загрузки (INFO) — ошибки ищутся по метке [ERROR]
         Write-ErrorLog -Type "INFO" -FileName $url -Details "Download started | ContentChoice: $contentChoice | Output folder: $dlDir" | Out-Null
 
+        # Снимаем обрамляющие кавычки с URL и пути cookies (артефакты вставки перетаскиванием),
+        # иначе при пути с пробелом аргументы склеятся и yt-dlp не увидит URL ("You must provide at least one URL")
+        $url = $url.Trim().Trim('"').Trim("'")
+        if ($downloadArgs.Count -gt 0 -and $downloadArgs[-1] -match '^https?://') { $downloadArgs[-1] = $url }
+        $authArgs = @($authArgs | ForEach-Object { if ($_ -is [string]) { $_.Trim().Trim('"').Trim("'") } else { $_ } })
+        $downloadArgs = @($downloadArgs | ForEach-Object { if ($_ -eq $url) { $url } elseif ($_ -is [string]) { $_.Trim().Trim('"').Trim("'") } else { $_ } })
+        # Пустые аргументы недопустимы: PowerShell склеивает их со следующим параметром
+        $authArgs = @($authArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $downloadArgs = @($downloadArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         $finalArgs = $authArgs + $commonArgs + $downloadArgs + @("--no-colors")
         $hasError = $false
         $dlOutput = @()
