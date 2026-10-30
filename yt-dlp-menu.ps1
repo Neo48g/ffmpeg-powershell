@@ -248,8 +248,35 @@ function Invoke-ImageDownload {
         # Прямая ссылка на файл-картинку: расширение ищем в конце URL или перед query-строкой (?...)
         # (ссылки DeviantArt и подобных CDN имеют вид ...jpg?token=<очень длинный JWT>)
         $uPath = ($u -split '\?')[0]
+
+        # Google Images: ссылки вида «Показать изображение» / «Копировать ссылку на изображение»
+        # имеют вид https://www.google.com/imgres?q=...&imgurl=<закодированная прямая ссылка>&imgrefurl=<страница-источник>&...
+        # yt-dlp такие ссылки не скачивает — вытаскиваем настоящую ссылку на файл из параметра imgurl.
+        # Работает для google.com / google.ru и других доменов, а также для старых /images?...&imgurl=...
+        $origTarget = $u   # исходная ссылка (для имени файла, если картинка без расширения в пути)
+        $refererArg = $null # Referer для прямого скачивания (страница-источник из imgrefurl)
+        $isGoogleImgres = ($u -match 'google\.[a-zA-Z.]*/(?:search/)?img(?:res|ages)')
+        if ($isGoogleImgres) {
+            if ($u -imatch '[?&]imgurl=([^&]+)') {
+                $decodedImgUrl = [Uri]::UnescapeDataString($Matches[1])
+                if ($decodedImgUrl -match '^https?://') {
+                    Write-Host "  $('Google image link detected, extracting direct URL from imgurl'): " -ForegroundColor DarkGray
+                    Write-Host "    $decodedImgUrl" -ForegroundColor DarkGray
+                    $u = $decodedImgUrl
+                    $uPath = ($u -split '\?')[0]
+                }
+            }
+            if ($u -imatch '[?&]imgrefurl=([^&]+)') {
+                $decodedRef = [Uri]::UnescapeDataString($Matches[1])
+                if ($decodedRef -match '^https?://') { $refererArg = $decodedRef }
+            }
+        }
+
         # -imatch: расширение в URL может быть в верхнем регистре (.JPG, .PNG)
-        if ($u -match '^https?://' -and $uPath -imatch "\.($($imageExts -join '|'))$") {
+        # Для Google imgres считаем ссылкой на файл также адреса без расширения (googleusercontent и т.п.)
+        $looksLikeFile = ($u -match '^https?://' -and $uPath -imatch "\.($($imageExts -join '|'))$")
+        $isGoogleDirect = ($isGoogleImgres -and $u -ne $origTarget -and $u -match '^https?://' -and $u -notmatch 'google')
+        if ($looksLikeFile -or $isGoogleDirect) {
             if (-not (Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
             try {
                 $uriObj = [System.Uri]::new($u)
@@ -260,11 +287,28 @@ function Invoke-ImageDownload {
                     $qs = [regex]::Matches($uriObj.Query, '(?:^|[&?])(?:filename|name)=([^&]+)')
                     if ($qs.Count -gt 0) { $fileName = $qs[0].Groups[1].Value }
                 }
+                # Имя файла: если путь URL закончился на '.'/'-' (после вырезания query), чистим хвост
+                $fileName = ($fileName -replace '[\.-]+$', '')
+                # Картинки Google (imgurl ведёт на googleusercontent без расширения в пути):
+                # даём осмысленное имя — по запросу (q=...) или домену источника (imgrefurl) из исходной ссылки
+                if ($isGoogleDirect -and $fileName -notmatch '\.(jpg|jpeg|png|gif|webp|bmp|tiff?|svg|ico|heic|avif)$') {
+                    $gName = $null
+                    if ($origTarget -imatch '[?&]q=([^&]+)') { $gName = [Uri]::UnescapeDataString($Matches[1]) -replace '[+]', ' ' }
+                    if (-not $gName -and $refererArg -match '^https?://([^/]+)') { $gName = $Matches[1] }
+                    if ($gName) {
+                        $gName = ($gName.Trim() -replace '[^\w\.\- ]', '_') -replace '\s+', '_'
+                        if ($gName.Length -gt 60) { $gName = $gName.Substring(0, 60) }
+                        $fileName = "google_$gName"   # расширение допишем по сигнатуре файла
+                    }
+                }
                 # Раскодировка %XX в имени файла без внешних зависимостей
                 $baseName = [regex]::Replace($fileName, '%([0-9A-Fa-f]{2})', { param($m) [char][Convert]::ToInt32($m.Groups[1].Value, 16) })
                 if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = "image_$((Get-Date -Format 'yyyyMMddHHmmss')).jpg" }
                 $baseName = ($baseName -replace '[^\w\.\-]', '_')
                 $destPath = Join-Path $OutputDir $baseName
+                # Google imgres может вести на картинку БЕЗ расширения в пути (например .../image;CROP,xxx).
+                # В этом случае расширение определим по сигнатуре скачанного файла (см. ниже).
+                $needExtFix = ($baseName -notmatch '\.[A-Za-z0-9]{2,5}$')
 
                 # Если файл уже существует — добавляем суффикс (1), (2), ...
                 if (Test-Path $destPath) {
@@ -276,13 +320,16 @@ function Invoke-ImageDownload {
 
                 Write-Host "  $('Downloading image')... $u" -ForegroundColor Cyan
                 $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+                # Referer: для Google imgres это страница-источник из imgrefurl (многие CDN требуют её),
+                # иначе — корень хоста картинки
+                $refererVal = if ($refererArg) { $refererArg } else { "$($uriObj.Scheme)://$($uriObj.Host)/" }
                 $got = $false
                 try {
                     # WebClient на старых PS может не поддерживать TLS1.2 — включаем принудительно
                     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
                     $wc = New-Object System.Net.WebClient
                     $wc.Headers.Add('User-Agent', $ua)
-                    $wc.Headers.Add('Referer', "$($uriObj.Scheme)://$($uriObj.Host)/")
+                    $wc.Headers.Add('Referer', $refererVal)
                     $wc.DownloadFile($u, $destPath)
                     $got = $true
                 } catch {
@@ -291,11 +338,19 @@ function Invoke-ImageDownload {
                 if (-not $got) {
                     # Резервный способ: Invoke-WebRequest (в PS 5.1 отключает «прогресс», чтобы не тормозить)
                     $ProgressPreference = 'SilentlyContinue'
-                    Invoke-WebRequest -Uri $u -OutFile $destPath -UserAgent $ua -Headers @{ Referer = "$($uriObj.Scheme)://$($uriObj.Host)/" } -UseBasicParsing -ErrorAction Stop
+                    Invoke-WebRequest -Uri $u -OutFile $destPath -UserAgent $ua -Headers @{ Referer = $refererVal } -UseBasicParsing -ErrorAction Stop
                     Write-Host "  $('WebClient failed, used Invoke-WebRequest'): $wcErr" -ForegroundColor DarkGray
                 }
                 # Проверка, что скачался именно файл, а не страница ошибки / заглушка
-                $head = @(Get-Content -Path $destPath -Encoding Byte -TotalCount 16 -ErrorAction SilentlyContinue)
+                # Читаем заголовок файла через .NET: совместимо и с PowerShell 5.1 (-Encoding Byte), и с PS Core
+                $head = @()
+                try {
+                    $fs = [System.IO.File]::OpenRead($destPath)
+                    $buf = New-Object byte[] 16
+                    $nRead = $fs.Read($buf, 0, 16)
+                    $fs.Close()
+                    $head = @($buf | Select-Object -First $nRead)
+                } catch {}
                 if ($head.Count -eq 0) { throw "Downloaded file is empty." }
                 $asText = -join ($head | ForEach-Object { [char]$_ })
                 $imgMagic = ($head[0] -eq 0xFF -or $head[0] -eq 0x89 -or ($head[0] -eq 0x47 -and $head[1] -eq 0x49) -or
@@ -303,6 +358,19 @@ function Invoke-ImageDownload {
                               ($head[0] -eq 0x42 -and $head[1] -eq 0x4D) -or ($asText -match '^<svg') -or ($asText -match '^(RIFF|BM)'))
                 if ((Get-Item $destPath).Length -lt 100 -or (-not $imgMagic)) {
                     throw "Server did not return a valid image (HTML/error page or empty file). The link may be expired (check the token) or may require cookies."
+                }
+                # Если в имени файла не было расширения (типично для Google imgres-ссылок без .jpg в пути) —
+                # дописываем расширение по сигнатуре скачанного файла
+                if ($needExtFix) {
+                    $sigExt = '.jpg'
+                    if ($head[0] -eq 0x89) { $sigExt = '.png' }
+                    elseif ($head[0] -eq 0x47) { $sigExt = '.gif' }
+                    elseif (($head[0] -eq 0x52) -and ($head[1] -eq 0x49)) { $sigExt = '.webp' }
+                    elseif (($head[0] -eq 0x42) -and ($head[1] -eq 0x4D)) { $sigExt = '.bmp' }
+                    $newPath = "$destPath$sigExt"
+                    if (Test-Path $newPath) { $n = 1; while (Test-Path $newPath) { $newPath = "${destPath}_$n$sigExt"; $n++ } }
+                    Rename-Item -Path $destPath -NewName (Split-Path $newPath -Leaf) -ErrorAction SilentlyContinue
+                    $destPath = $newPath
                 }
                 $sizeBytes = (Get-Item $destPath).Length
                 $sizeStr = if ($sizeBytes -ge 1MB) { "{0:N2} MB" -f ($sizeBytes / 1MB) } else { "{0:N2} KB" -f ($sizeBytes / 1KB) }
@@ -325,6 +393,56 @@ function Invoke-ImageDownload {
         # Ссылка на страницу/пост (VK, Instagram, Pinterest и т.п.) или неизвестный тип —
         # передаём yt-dlp: он скачает превью/изображения со страниц, поддерживающих его экстракторы
         if ($u -match '^https?://') {
+            # Резервный вариант для Google imgres БЕЗ параметра imgurl (например /imgres?...&tbnid=...):
+            # скачиваем саму страницу-обёртку и вытаскиваем из неё прямую ссылку на картинку.
+            # Ссылки в HTML Google лежат в атрибутах src="..." и data-src="..." — берём первую http-ссылку с расширением картинки.
+            if ($isGoogleImgres) {
+                Write-Host "  $('No imgurl parameter found, trying to extract direct image URL from the Google page')..." -ForegroundColor DarkGray
+                try {
+                    $ProgressPreference = 'SilentlyContinue'
+                    $gHtml = (Invoke-WebRequest -Uri $u -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' -UseBasicParsing -ErrorAction Stop).Content
+                    $gDirect = $null
+                    # Картинки Google могут быть и без расширения в пути (lh3.googleusercontent.com/...) —
+                    # сначала ищем googleusercontent, затем любой http-адрес с расширением картинки
+                    foreach ($gm in [regex]::Matches($gHtml, '(?:src|data-src|href)="(https?://[^"]+)"')) {
+                        $cand = ([Uri]::UnescapeDataString($gm.Groups[1].Value)) -replace '&amp;', '&'
+                        if ($cand -match 'googleusercontent\.com/') { $gDirect = $cand; break }
+                        if ($cand -imatch '\.(jpg|jpeg|png|gif|webp|bmp)(\?|$)' -and $cand -notmatch 'google') { $gDirect = $cand; break }
+                    }
+                    if (-not $gDirect) {
+                        $gmAll = [regex]::Match($gHtml, '(https?://[^"''\s<>]+?\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^"''\s<>]*)?)', 'IgnoreCase')
+                        if ($gmAll.Success) { $gDirect = $gmAll.Value }
+                    }
+                    if ($gDirect) {
+                        Write-Host "    $('Extracted direct URL'): $gDirect" -ForegroundColor DarkGray
+                        # Прямое скачивание извлечённой ссылки (без повторного прогона через весь конвейер)
+                        try {
+                            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                            $gdUri = [System.Uri]::new($gDirect)
+                            $gdName = ($gdUri.AbsolutePath.Split('/')[-1])
+                            if ([string]::IsNullOrWhiteSpace($gdName)) { $gdName = "google_image" }
+                            $gdName = ($gdName -replace '[^\w\.\-]', '_')
+                            if ($gdName -notmatch '\.[A-Za-z0-9]{2,5}$') { $gdName += '.jpg' }
+                            $gdPath = Join-Path $OutputDir $gdName
+                            if (Test-Path $gdPath) { $n = 1; while (Test-Path $gdPath) { $stem=[System.IO.Path]::GetFileNameWithoutExtension($gdName); $ext=[System.IO.Path]::GetExtension($gdName); $gdPath = Join-Path $OutputDir "${stem}_$n$ext"; $n++ } }
+                            $wc2 = New-Object System.Net.WebClient
+                            $wc2.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36')
+                            $wc2.DownloadFile($gDirect, $gdPath)
+                            if ((Get-Item $gdPath).Length -ge 100) {
+                                Write-Host "  [OK] $gdPath" -ForegroundColor Green
+                                $okCount++
+                            } else { Remove-Item $gdPath -Force }
+                        } catch {
+                            Write-Host "  [X] $('Failed to download'): $($_.Exception.Message)" -ForegroundColor Red
+                            $failCount++
+                        }
+                        continue
+                    }
+                    Write-Host "  [!] $('Could not extract a direct image link from the Google page')" -ForegroundColor Yellow
+                } catch {
+                    Write-Host "  [!] $('Google page request failed'): $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
             Write-Host "  $('Trying yt-dlp image extraction')... $u" -ForegroundColor Cyan
             # ВАЖНО: параметры и URL разделяются знаком "--", иначе длинная ссылка (с токеном)
             # может быть воспринята неверно и yt-dlp выдаст "You must provide at least one URL"
@@ -462,6 +580,7 @@ do {
 
         $downloadArgs = @()
         $statusMsg = "Downloading..."
+        $imagesDone = $false   # флаг ветки [6]: после картинок не заходить в видео-конвейер
 
         # Папка загрузки создаётся в корневой папке программы: $ScriptDir\downloaded
         $dlDir = Join-Path $ScriptDir "downloaded"
@@ -529,24 +648,28 @@ do {
                     }
                 }
 
-                if (@($imageUrls).Count -eq 0) {
+                if (@($imageUrls).Count -gt 0) {
+                    $imgDir = Join-Path $dlDir "images"
+                    if (-not (Test-Path $imgDir)) { New-Item -ItemType Directory -Path $imgDir -Force | Out-Null }
+
+                    Write-ErrorLog -Type "INFO" -FileName ($imageUrls -join ', ') -Details "Image download started | Count: $(@($imageUrls).Count) | Output folder: $imgDir" | Out-Null
+
+                    Invoke-ImageDownload -Urls $imageUrls -OutputDir $imgDir -AuthArgs $authArgs
+                } else {
                     Write-Host "  [X] $('No valid URLs entered')" -ForegroundColor Red
-                    Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
-                    Read-Host
-                    continue
                 }
-
-                $imgDir = Join-Path $dlDir "images"
-                if (-not (Test-Path $imgDir)) { New-Item -ItemType Directory -Path $imgDir -Force | Out-Null }
-
-                Write-ErrorLog -Type "INFO" -FileName ($imageUrls -join ', ') -Details "Image download started | Count: $(@($imageUrls).Count) | Output folder: $imgDir" | Out-Null
-
-                Invoke-ImageDownload -Urls $imageUrls -OutputDir $imgDir -AuthArgs $authArgs
-
-                Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
-                Read-Host
-                continue
+                # Ветка картинок завершена: дальше — возврат в меню (см. флаг ниже),
+                # видео-конвейер с пустым $url трогать нельзя
+                $imagesDone = $true
             }
+        }
+
+        # Скачивание картинок [6] завершено — возвращаемся в начало цикла, минуя видео-конвейер.
+        # Иначе fall-through с пустым $url выдавал пугающее "[X] Invalid URL..." после нажатия Enter.
+        if ($imagesDone) {
+            Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
+            Read-Host
+            continue
         }
 
         # Защита от пустого/битого ввода в основном конвейере: без корректного URL yt-dlp
