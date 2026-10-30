@@ -9,11 +9,13 @@
 ### Features
 - Compress video with CPU and GPU.
 - Convert video, images, and audio.
-- Trim video by timecode.
-- Download video, audio, playlists, and video fragments.
+- Trim video by timecode
+- Download video, images, audio, playlists, and video fragments.
+- Extract\remove audio from video
 - Install and update tools from the menu.
 - Video quality check using VMAF.
 - Automatic CRF reduction if quality is insufficient.
+- Misc features: black & white, deep fry (comedy low quality)
 
 #### use RUN_HUB.bat
 
