@@ -7,7 +7,7 @@ $ToolsDir = Join-Path $ScriptDir "tools"
 
 # --- Информация о программе и автоапдейт ---
 # Текущая версия программы (при успешном автоапдейте обновляется в global_config.json)
-$global:HubDefaultVersion = "0.4"
+$global:HubDefaultVersion = "0.5"
 $global:HubRepo        = "Neo48g/ffmpeg-powershell"  # GitHub-репозиторий для проверки обновлений (последний релиз)
 $global:HubUpdateState = "unknown" # last / none / error / skipped (для повторных проверок в рамках сессии)
 
