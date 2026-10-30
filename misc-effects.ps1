@@ -106,6 +106,120 @@ function Get-AudioCodecName {
     return ("$codec").Trim()
 }
 
+function Get-AudioStreamList {
+    # Возвращает список всех аудиодорожек медиафайла: индекс audio-потока (0:a:N), кодек, язык, название дорожки
+    param([string]$InPath)
+    $list = @()
+    try {
+        $lines = & ffprobe -v error -select_streams "a" -show_entries "stream=index,codec_name:stream_tags=language,title" -of "csv=p=0" "$InPath" 2>$null
+        $audioNo = 0   # порядковый номер аудиодорожки для -map 0:a:N (ffprobe нумерует потоки в файле сквозным индексом)
+        foreach ($line in @($lines)) {
+            $s = ("$line").Trim()
+            if ([string]::IsNullOrWhiteSpace($s)) { continue }
+            $parts = @($s.Split(',') | ForEach-Object { ('{0}' -f $_).Trim() })
+            if ($parts.Count -lt 2 -or $parts[0] -notmatch '^\d+$') { continue }
+            $codecName = $parts[1]
+            if (-not $codecName) { continue }
+            $lang = ''; $title = ''
+            foreach ($t in $parts) {
+                if ($t -like 'language=*') { $lang  = $t.Substring(9) }
+                elseif ($t -like 'title=*') { $title = $t.Substring(6) }
+            }
+            $list += [pscustomobject]@{ Index = "$audioNo"; Codec = $codecName; Language = $lang; Title = $title }
+            $audioNo++
+        }
+    } catch {}
+    return $list
+}
+
+function Get-MuxerForCodec {
+    # Подбирает контейнер/максер и расширение для stream copy выбранного аудиокодека
+    param([string]$Codec)
+    switch ($Codec) {
+        'aac'        { return @{ Ext = '.m4a'; Muxer = 'ipod' } }
+        'mp3'        { return @{ Ext = '.mp3'; Muxer = 'mp3' } }
+        'opus'       { return @{ Ext = '.opus'; Muxer = 'opus' } }
+        'flac'       { return @{ Ext = '.flac'; Muxer = 'flac' } }
+        'vorbis'     { return @{ Ext = '.ogg'; Muxer = 'ogg' } }
+        'pcm_s16le'  { return @{ Ext = '.wav'; Muxer = 'wav' } }
+        'pcm_s24le'  { return @{ Ext = '.wav'; Muxer = 'wav' } }
+        'pcm_f32le'  { return @{ Ext = '.wav'; Muxer = 'wav' } }
+        'alac'       { return @{ Ext = '.m4a'; Muxer = 'ipod' } }
+        default      { return @{ Ext = '.mkv'; Muxer = 'matroska' } }  # ac3/eac3/dts/truehd и прочие — в MKV без перекодирования
+    }
+}
+
+function Test-AudioFileValid {
+    # Проверяет, что извлечённый файл действительно содержит аудиопоток (ffmpeg может вернуть 0 при пустом выводе)
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    try {
+        $c = & ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$Path" 2>$null
+        return -not [string]::IsNullOrWhiteSpace(("$c").Trim())
+    } catch { return $false }
+}
+
+function Show-AudioTrackList {
+    # Печатает список аудиодорожек вида: [N] Track M: codec | Language: xx | title
+    param($Tracks)
+    for ($i = 0; $i -lt $Tracks.Count; $i++) {
+        $t = $Tracks[$i]
+        $info = "[$($i+1)] $('Track') $($t.Index): $($t.Codec)"
+        if ($t.Language -and $t.Language -ne 'und') { $info += " | $('Language'): $($t.Language)" }
+        if ($t.Title) { $info += " | $($t.Title)" }
+        Write-Host "  $info" -ForegroundColor White
+    }
+}
+
+function Select-AudioTracks {
+    # Предлагает выбрать какую аудиодорожку извлечь (или каждую/все). Возвращает массив выбранных дорожек.
+    param($Tracks)
+    if ($Tracks.Count -eq 1) {
+        # Дорожка одна — выбирать нечего
+        return @($Tracks[0])
+    }
+    while ($true) {
+        Write-Host "`n  $('Select an audio track to extract, or E to extract each track:')`n" -ForegroundColor White
+        Show-AudioTrackList -Tracks $Tracks
+        Write-Host "  [A] $('All tracks')   [E] $('Each track as a separate file')   [0] $('Back')" -ForegroundColor DarkGray
+        $sel = (Read-Host "  $('Track')").Trim()
+        if ($sel -eq '0' -or [string]::IsNullOrWhiteSpace($sel)) { return $null }
+        if ($sel -match '^(?i:a)$') { return ,@($Tracks) }
+        if ($sel -match '^(?i:e)$') { return ,@(@($Tracks)) }
+        if ($sel -match '^[\d,\s]+$') {
+            $picked = @(); $bad = $false
+            foreach ($p in ($sel -split '[,\s]+' | Where-Object { $_ -ne '' })) {
+                $idx = [int]$p - 1
+                if ($idx -lt 0 -or $idx -ge $Tracks.Count) { $bad = $true; break }
+                if ($picked.Index -notcontains $Tracks[$idx].Index) { $picked += $Tracks[$idx] }
+            }
+            if ($bad) {
+                Write-Host "  [X] $('Invalid selection') (1..$($Tracks.Count))" -ForegroundColor Red; Start-Sleep 1; continue
+            }
+            if ($picked.Count -gt 0) { return ,@($picked) }
+        }
+        Write-Host "  [X] $('Invalid selection')" -ForegroundColor Red; Start-Sleep 1
+    }
+}
+
+function Ask-AudioFormat {
+    # После выбора дорожки предлагает формат извлечения.
+    # Возвращает hashtable: Copy=$true (stream copy без перекодирования, контейнер подберётся по кодеку дорожки)
+    # либо Copy=$false и Encoder (целевой кодировщик: mp3/aac/opus/flac/wav).
+    while ($true) {
+        Write-Host "`n  $('Select output format:')`n" -ForegroundColor White
+        Write-Host "  [1] $('Original codec (no re-encoding, fast)')" -ForegroundColor White
+        Write-Host "  [2] MP3   [3] M4A (AAC)   [4] OPUS   [5] FLAC   [6] WAV" -ForegroundColor White
+        Write-Host "  [0] $('Back')" -ForegroundColor White
+        $fmt = (Read-Host "  $('Format')").Trim()
+        if ($fmt -eq '0' -or [string]::IsNullOrWhiteSpace($fmt)) { return $null }
+        if ($fmt -notin @('1','2','3','4','5','6')) { Write-Host "  [X] $('Invalid selection')" -ForegroundColor Red; Start-Sleep 1; continue }
+        if ($fmt -eq '1') { return @{ Copy = $true } }
+        $mapFmt = @{ '2'='libmp3lame'; '3'='aac'; '4'='libopus'; '5'='flac'; '6'='pcm_s16le' }
+        return @{ Copy = $false; Encoder = $mapFmt[$fmt] }
+    }
+}
+
 # --- 1. Чёрно-белое фото/видео ---
 function Invoke-MiscGrayscale {
     $ff = Get-FFmpegPath
@@ -164,41 +278,97 @@ function Invoke-MiscExtractAudio {
     $outDir = Join-Path $ScriptDir "misc"
     if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 
-    Write-Host "`n  $('Select output format:')" -ForegroundColor White
-    Write-Host "  [1] $('Original codec (no re-encoding, fast)')" -ForegroundColor White
-    Write-Host "  [2] MP3   [3] M4A (AAC)   [4] OPUS   [5] FLAC   [6] WAV   [0] $('Back')" -ForegroundColor White
-    $fmt = Read-Host "  Format"
-    if ($fmt -eq '0' -or [string]::IsNullOrWhiteSpace($fmt)) { return }
+    # --- Шаг 1: после ввода видеофайла предлагаем выбрать аудиодорожку (или каждую) ---
+    $allTracks = @(Get-AudioStreamList -InPath $inPath)
+    if ($allTracks.Count -eq 0) { Write-Host "  [X] $('No audio track found in this video')" -ForegroundColor Red; Start-Sleep 2; return }
 
-    Write-Host "`n  $('Processing...')" -ForegroundColor Yellow
-    $logFile = Join-Path $TempDir "ffmpeg_misc_audio.txt"
-    $FFArgs = @("-hide_banner","-loglevel","error","-y","-i",$inPath,"-vn")
-    switch ($fmt) {
-        '1' {
-            $codec = Get-AudioCodecName -InPath $inPath
-            if (-not $codec) { Write-Host "  [X] $('No audio track found in this video')" -ForegroundColor Red; Start-Sleep 2; return }
-            $map = [ordered]@{ 'aac'=@('.m4a','ipod'); 'mp3'=@('.mp3','mp3'); 'opus'=@('.opus','opus'); 'flac'=@('.flac','flac'); 'vorbis'=@('.ogg','ogg'); 'pcm_s16le'=@('.wav','wav'); 'pcm_s24le'=@('.wav','wav') }
-            if ($map.Contains($codec)) { $outExt = $map[$codec][0]; $muxer = $map[$codec][1] }
-            else { $outExt = ".$codec"; $muxer = $null }
-            $out = Join-Path $outDir "$base`_audio$outExt"
-            $FFArgs += @("-acodec","copy")
-            if ($muxer) { $FFArgs += @("-f",$muxer) }
-            $FFArgs += $out
+    if ($allTracks.Count -gt 1) {
+        Write-Host "`n  $('Audio tracks found'): $($allTracks.Count)" -ForegroundColor White
+    }
+    $sel = Select-AudioTracks -Tracks $allTracks
+    if ($null -eq $sel) { return }   # возвращаемся в меню
+
+    $eachMode = ($sel.Count -gt 1)   # выбрано несколько дорожек (каждая/все) — каждая сохраняется отдельным файлом
+    $multi = ($eachMode -or $allTracks.Count -gt 1)
+
+    # --- Шаг 2: после выбора дорожки предлагаем формат извлечения (один раз для всех выбранных дорожек) ---
+    $fmtSel = Ask-AudioFormat
+    if ($null -eq $fmtSel) { return }  # «Назад» — возвращаемся в меню
+
+    function script:Build-ExtractArgs {
+        param([string]$InPath, $Track, $Fmt, [string]$Out, [switch]$MapTrack)
+        # Собирает аргументы ffmpeg для одной дорожки: stream copy либо перекодирование в выбранный формат
+        $a = @("-hide_banner","-loglevel","error","-y","-i",$InPath)
+        if ($MapTrack) { $a += @("-map","0:a:$($Track.Index)","-vn","-map_metadata","-1") } else { $a += "-vn" }
+        if ($Fmt.Copy) {
+            # Stream copy: контейнер подбирается под кодек именно этой дорожки
+            $mk = Get-MuxerForCodec -Codec $Track.Codec
+            $a += @("-c:a","copy","-f",$mk.Muxer,$Out)
         }
-        '2' { $out = Join-Path $outDir "$base`_audio.mp3"; $FFArgs += @("-acodec","libmp3lame","-q:a","2",$out) }
-        '3' { $out = Join-Path $outDir "$base`_audio.m4a"; $FFArgs += @("-acodec","aac","-b:a","192k",$out) }
-        '4' { $out = Join-Path $outDir "$base`_audio.opus"; $FFArgs += @("-acodec","libopus","-b:a","128k",$out) }
-        '5' { $out = Join-Path $outDir "$base`_audio.flac"; $FFArgs += @("-acodec","flac",$out) }
-        '6' { $out = Join-Path $outDir "$base`_audio.wav";  $FFArgs += @("-acodec","pcm_s16le",$out) }
-        default { return }
+        else {
+            $a += @("-c:a",$Fmt.Encoder)
+            switch ($Fmt.Encoder) {
+                'libmp3lame' { $a += @("-q:a","2") }
+                'aac'        { $a += @("-b:a","192k") }
+                'libopus'    { $a += @("-b:a","128k") }
+            }
+            $a += $Out
+        }
+        return $a
     }
 
-    $code = Invoke-FFmpegJob -Exe $ff -FFArgs $FFArgs -LogFile $logFile
-    if ($code -eq 0 -and (Test-Path $out)) { Write-Host "  [OK] $('Saved'): $out" -ForegroundColor Green }
-    else {
-        Write-Host "  [X] $('Error')" -ForegroundColor Red
-        Save-JobLog -BaseName $base -LogFile $logFile
+    function script:Get-AudioOutExt {
+        param($Fmt, $Track)
+        # Расширение выходного файла: по контейнеру кодировщика либо по максеру оригинального кодека
+        if (-not $Fmt.Copy) {
+            $encExt = @{ 'libmp3lame'='.mp3'; 'aac'='.m4a'; 'libopus'='.opus'; 'flac'='.flac'; 'pcm_s16le'='.wav' }
+            if ($encExt.ContainsKey($Fmt.Encoder)) { return $encExt[$Fmt.Encoder] }
+        }
+        return (Get-MuxerForCodec -Codec $Track.Codec).Ext
+    }
+
+    function script:Extract-AudioTrack {
+        param([string]$Ff, [string]$InPath, [string]$Base, [string]$OutDir, $Track, $Fmt, [bool]$Multi)
+        # Извлекает одну аудиодорожку в выбранном формате; возвращает $true при успехе
+        $safeBase = ($Base -replace '[\\/:*?"<>|]', '_')
+        $suffix = ''
+        if ($Multi) {
+            $suffix = "-a$($Track.Index)"
+            if ($Track.Language -and $Track.Language -ne 'und') { $suffix += "_$($Track.Language)" }
+        }
+        $out = Join-Path $OutDir "$safeBase${suffix}_audio$(Get-AudioOutExt -Fmt $Fmt -Track $Track)"
+        $logFile = Join-Path $TempDir "ffmpeg_misc_audio.txt"
+        $FFArgs = Build-ExtractArgs -InPath $InPath -Track $Track -Fmt $Fmt -Out $out -MapTrack:$Multi
+        $code = Invoke-FFmpegJob -Exe $Ff -FFArgs $FFArgs -LogFile $logFile
+        if ($Fmt.Copy -and ($code -ne 0 -or -not (Test-AudioFileValid -Path $out))) {
+            # Резервный вариант: stream copy в этот контейнер невозможен — перекодируем дорожку в AAC (M4A)
+            if (Test-Path $out) { Remove-Item $out -Force -ErrorAction SilentlyContinue }
+            $out = Join-Path $OutDir "$safeBase${suffix}_audio.m4a"
+            $FFArgs = Build-ExtractArgs -InPath $InPath -Track $Track -Fmt @{ Copy = $false; Encoder = 'aac' } -Out $out -MapTrack:$Multi
+            $code = Invoke-FFmpegJob -Exe $Ff -FFArgs $FFArgs -LogFile $logFile
+        }
+        if ($code -eq 0 -and (Test-Path $out)) {
+            Write-Host "  [OK] $('Saved'): $out" -ForegroundColor Green
+            return $true
+        }
+        Write-Host "  [X] $('Error'): $('Track') $($Track.Index)" -ForegroundColor Red
+        Save-JobLog -BaseName "${Base}_track$($Track.Index)" -LogFile $logFile
         Get-Content $logFile -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        return $false
+    }
+
+    Write-Host "`n  $('Processing...')" -ForegroundColor Yellow
+    $okCount = 0; $failCount = 0
+    foreach ($t in $sel) {
+        if (Extract-AudioTrack -Ff $ff -InPath $inPath -Base $base -OutDir $outDir -Track $t -Fmt $fmtSel -Multi $multi) {
+            $okCount++
+        } else {
+            $failCount++
+        }
+    }
+    if ($eachMode) {
+        Write-Host "`n  $('Done'): $okCount $('file(s) saved')" -ForegroundColor Green
+        if ($failCount -gt 0) { Write-Host "  [!] $('Failed'): $failCount" -ForegroundColor DarkYellow }
     }
     Write-Host "`n  $('Press Enter to continue...')" -ForegroundColor Gray
     Read-Host
