@@ -30,6 +30,9 @@ $script:selectedFiles = New-Object System.Collections.Generic.List[string]
 $script:crfValue = 23; $script:hwDevice = "CPU"; $script:codec = "h264"
 $script:enableVMAF = $false; $script:enableAutoCRF = $false
 $script:vmafThreshold = 90; $script:maxIterations = 3; $script:minCRF = 18
+# Пресет скорости кодирования (-preset), выбирается в пункте [3] Quality & Speed.
+# Значение 'auto' = подбор по кодировщику (см. Get-AutoPresetForEncoder).
+$script:speedPreset = "auto"
 # Ограничение целевого размера файла (МБ). 0 = выключено. Варианты: 10, 20 или своё значение.
 $script:targetSizeMB = 0
 $script:LastProgressInfo = @{ CurrentTime = 0.0; Percent = 0.0 }  # обновляется циклом прогресса
@@ -64,6 +67,7 @@ function Show-PresetsMenu {
                 if ([string]::IsNullOrWhiteSpace($name)) { continue }
                 $script:presets[$name] = @{
                     HwDevice=$script:hwDevice; Codec=$script:codec; CRF=$script:crfValue
+                    SpeedPreset=$script:speedPreset
                     EnableVMAF=$script:enableVMAF; EnableAutoCRF=$script:enableAutoCRF
                     VMAFThreshold=$script:vmafThreshold; MaxIterations=$script:maxIterations; MinCRF=$script:minCRF
                     TargetSizeMB=$script:targetSizeMB
@@ -75,11 +79,12 @@ function Show-PresetsMenu {
             '2' {
                 if ($script:presets.Count -eq 0) { Write-Host "`n  [X] $('No presets saved')" -ForegroundColor Red; Start-Sleep 1; continue }
                 $keys = $script:presets.Keys | Sort-Object; $i = 1
-                foreach ($k in $keys) { Write-Host "  [$i] $k ($($script:presets[$k].HwDevice) | $($script:presets[$k].Codec) | CRF:$($script:presets[$k].CRF) | $(if ($script:presets[$k].TargetSizeMB -gt 0) { "<=$($script:presets[$k].TargetSizeMB) MB" } else { 'MaxSize:OFF' }))" -ForegroundColor White; $i++ }
+                foreach ($k in $keys) { Write-Host "  [$i] $k ($($script:presets[$k].HwDevice) | $($script:presets[$k].Codec) | CRF:$($script:presets[$k].CRF) | $($script:presets[$k].SpeedPreset) | $(if ($script:presets[$k].TargetSizeMB -gt 0) { "<=$($script:presets[$k].TargetSizeMB) MB" } else { 'MaxSize:OFF' }))" -ForegroundColor White; $i++ }
                 $idx = Read-Host "  Select number"
                 if ($idx -match '^\d+$' -and [int]$idx -ge 1 -and [int]$idx -le $keys.Count) {
                     $p = $script:presets[$keys[[int]$idx - 1]]
                     $script:hwDevice=$p.HwDevice; $script:codec=$p.Codec; $script:crfValue=[int]$p.CRF
+                    $script:speedPreset = if ($p.SpeedPreset) { "$($p.SpeedPreset)" } else { "auto" }
                     $script:enableVMAF=[bool]$p.EnableVMAF; $script:enableAutoCRF=[bool]$p.EnableAutoCRF
                     $script:vmafThreshold=[int]$p.VMAFThreshold; $script:maxIterations=[int]$p.MaxIterations; $script:minCRF=[int]$p.MinCRF
                     if ($null -ne $p.TargetSizeMB) { $script:targetSizeMB = [double]$p.TargetSizeMB } else { $script:targetSizeMB = 0 }
@@ -144,14 +149,107 @@ function Warn-IfSlowProcessing {
     }
 }
 
+# --- Пресеты скорости (-preset) по кодировщику ---
+# Список допустимых значений зависит от кодировщика:
+#   libx264/libx265 — словесные (ultrafast..veryslow); libsvtav1 — число 0..10 (0 = самый быстрый);
+#   nvenc/amf/qsv   — p1..p7.
+# Значение 'auto' = подбор по кодировщику (Get-AutoPresetForEncoder).
+
+function Get-SpeedPresetList {
+    param([string]$HwDevice, [string]$Codec)
+    if ($HwDevice -ne "CPU") {
+        return @("auto","p1","p2","p3","p4","p5","p6","p7")
+    }
+    switch ($Codec) {
+        "av1"  { return @("auto","0","1","2","3","4","5","6","7","8","9","10") }
+        "h265" { return @("auto","ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow") }
+        default{ return @("auto","ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow") }
+    }
+}
+
+function Get-AutoPresetForEncoder {
+    param([string]$Encoder)
+    switch ($Encoder) {
+        "libsvtav1" { return "4" }
+        "libx265"   { return "medium" }
+        default     { return "medium" }
+    }
+}
+
+function Resolve-SpeedPreset {
+    param([string]$Encoder)
+    $sel = "$script:speedPreset"
+    if ([string]::IsNullOrWhiteSpace($sel) -or $sel -eq "auto") { return Get-AutoPresetForEncoder -Encoder $Encoder }
+    # Защита от несовместимых значений (например, словесный пресет для libsvtav1)
+    if ($Encoder -eq "libsvtav1") {
+        if ($sel -notmatch '^\d+$') { return Get-AutoPresetForEncoder -Encoder $Encoder }
+        $n = [int]$sel; if ($n -lt 0 -or $n -gt 10) { return Get-AutoPresetForEncoder -Encoder $Encoder }
+    } else {
+        if (@(Get-SpeedPresetList -HwDevice "CPU" -Codec "h264") -notcontains $sel) { return Get-AutoPresetForEncoder -Encoder $Encoder }
+    }
+    return $sel
+}
+
+function Show-SpeedPresetMenu {
+    $list = @(Get-SpeedPresetList -HwDevice $script:hwDevice -Codec $script:codec)
+    Write-Host "`n  $('Speed preset') (-preset) | $('HW'): $script:hwDevice | $('Codec'): $script:codec" -ForegroundColor White
+    Write-Host "  [0] $('Back')" -ForegroundColor DarkGray
+    $i = 1
+    foreach ($p in $list) {
+        $mark = if ($p -eq $script:speedPreset) { "*" } else { " " }
+        Write-Host "  [$i]$mark $p" -ForegroundColor White
+        $i++
+    }
+    $sel = Read-Host "  $('Select preset number') [$script:speedPreset]"
+    if ([string]::IsNullOrWhiteSpace($sel)) { return }
+    if ($sel -eq '0') { return }
+    if ($sel -match '^\d+$' -and [int]$sel -ge 1 -and [int]$sel -le $list.Count) {
+        $script:speedPreset = $list[[int]$sel - 1]
+        Write-Host "  [OK] $('Speed preset'): $script:speedPreset" -ForegroundColor Green
+        Start-Sleep 1
+    }
+}
+
+function Show-VMAFMenu {
+    do {
+        Show-Banner "VMAF QUALITY CHECK"
+        Write-Host "  $('VMAF'): $(if($script:enableVMAF){'ON'}else{'OFF'}) | $('AutoCRF'): $(if($script:enableAutoCRF){'ON'}else{'OFF'})" -ForegroundColor White
+        Write-Host "  $('VMAF Threshold'): $script:vmafThreshold | $('Max iterations'): $script:maxIterations | $('Min CRF'): $script:minCRF" -ForegroundColor White
+        Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
+        Write-Host "  [1] $('Enable/Disable VMAF check') ($(if($script:enableVMAF){'ON'}else{'OFF'}))" -ForegroundColor White
+        Write-Host "  [2] $('Enable/Disable AutoCRF') ($(if($script:enableAutoCRF){'ON'}else{'OFF'}))" -ForegroundColor White
+        Write-Host "  [3] $('Set VMAF threshold') ($script:vmafThreshold)" -ForegroundColor White
+        Write-Host "  [4] $('Set max iterations') ($script:maxIterations)" -ForegroundColor White
+        Write-Host "  [5] $('Set min CRF') ($script:minCRF)" -ForegroundColor White
+        Write-Host "`n  [0] $('Back')" -ForegroundColor Red
+        $c = Read-Host "  Choice"
+        switch ($c) {
+            '1' { $script:enableVMAF = -not $script:enableVMAF
+                  if (-not $script:enableVMAF) { $script:enableAutoCRF = $false }
+                  Write-Host "  $('VMAF'): $(if($script:enableVMAF){'ON'}else{'OFF'})" -ForegroundColor Green; Start-Sleep 1 }
+            '2' { if (-not $script:enableVMAF) { Write-Host "  [!] $('Enable VMAF first')" -ForegroundColor Yellow; Start-Sleep 1 } else {
+                    $script:enableAutoCRF = -not $script:enableAutoCRF
+                    Write-Host "  $('AutoCRF'): $(if($script:enableAutoCRF){'ON'}else{'OFF'})" -ForegroundColor Green; Start-Sleep 1 } }
+            '3' { $t = Read-Host "  $('VMAF Threshold') (0-100) [$script:vmafThreshold]"
+                  if ($t -match '^\d+$' -and [int]$t -le 100) { $script:vmafThreshold = [int]$t } }
+            '4' { $t = Read-Host "  $('Max iterations') (1-10) [$script:maxIterations]"
+                  if ($t -match '^\d+$' -and [int]$t -ge 1 -and [int]$t -le 10) { $script:maxIterations = [int]$t } }
+            '5' { $t = Read-Host "  $('Min CRF') (0-51) [$script:minCRF]"
+                  if ($t -match '^\d+$' -and [int]$t -le 51) { $script:minCRF = [int]$t } }
+        }
+    } while ($c -ne '0')
+}
+
 # --- Сжатие до целевого размера файла (двухпроходное кодирование по битрейту) ---
 # Возвращает строку аргументов ffmpeg для одного прохода; $PassNum = 1 или 2.
 function Build-TwoPassArgs {
     param([int]$VideoBitrateK, [double]$AudioBitrateK, [int]$PassNum, [string]$PassLogFile)
     $vCodec = switch ($script:codec) { "h265" {"libx265"} "av1" {"libsvtav1"} default {"libx264"} }
+    # Пресет скорости берём из настройки [3]; для libsvtav1 допустимы только числа 0..10 (см. Resolve-SpeedPreset)
+    $presetArg = "-preset $(Resolve-SpeedPreset -Encoder $vCodec)"
     $aArgs = if ($AudioBitrateK -gt 0) { "-c:a aac -b:a ${AudioBitrateK}k" } else { "-an" }
     $passLogArg = if ($PassLogFile) { " -passlogfile `"$PassLogFile`"" } else { "" }
-    return "-c:v $vCodec -preset medium -b:v ${VideoBitrateK}k -maxrate ${VideoBitrateK}k -bufsize $([int]($VideoBitrateK * 2))k -pass $PassNum$passLogArg $aArgs"
+    return "-c:v $vCodec $presetArg -b:v ${VideoBitrateK}k -maxrate ${VideoBitrateK}k -bufsize $([int]($VideoBitrateK * 2))k -pass $PassNum$passLogArg $aArgs"
 }
 
 # Двухпроходное сжатие до целевого размера. Возвращает $true при успехе.
@@ -334,7 +432,7 @@ function Write-ErrorLog {
             "======================================================================"
             "[$Type] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             "File: $FileName"
-            "Settings: HW=$script:hwDevice | Codec=$script:codec | CRF=$script:crfValue | VMAF=$(if($script:enableVMAF){'ON'}else{'OFF'})"
+            "Settings: HW=$script:hwDevice | Codec=$script:codec | CRF=$script:crfValue | Preset=$script:speedPreset | VMAF=$(if($script:enableVMAF){'ON'}else{'OFF'})"
             "Details:"
             $Details
             ""
@@ -443,19 +541,26 @@ function Build-FileList {
     return ,@($items)
 }
 
+# Пресеты ffmpeg-кодировщиков различаются: у libx264/libx265 они словесные (ultrafast..veryslow),
+# а у libsvtav1 это число 0..10 (по умолчанию 4). Слово "medium" для SVT-AV1 невалидно и приводит к ошибке
+# "Undefined constant or missing '(' in 'medium'". Поэтому пресет подбирается по кодировщику
+# и учитывает выбор пользователя в пункте меню [3] (Resolve-SpeedPreset / Get-AutoPresetForEncoder выше).
+
 function Build-FFmpegArgs {
     param([int]$Quality)
     $vArgs = ""
     if ($script:hwDevice -eq "CPU") {
         $enc = switch ($script:codec) { "h264" {"libx264"} "h265" {"libx265"} "av1" {"libsvtav1"} default {"libx264"} }
-        $vArgs = "-c:v $enc -crf $Quality -preset medium"
+        $vArgs = "-c:v $enc -crf $Quality -preset $(Resolve-SpeedPreset -Encoder $enc)"
     } else {
         $enc = switch ($script:hwDevice) {
             "NVIDIA" { switch ($script:codec) { "h264" {"h264_nvenc"} "h265" {"hevc_nvenc"} "av1" {"av1_nvenc"} } }
             "AMD"    { switch ($script:codec) { "h264" {"h264_amf"} "h265" {"hevc_amf"} "av1" {"av1_amf"} } }
             "Intel"  { switch ($script:codec) { "h264" {"h264_qsv"} "h265" {"hevc_qsv"} "av1" {"av1_qsv"} } }
         }
-        $vArgs = "-c:v $enc -cq $Quality -preset p4"
+        # Для аппаратных кодировщиков пресеты вида p1..p7; 'auto' = p4 (баланс качества/скорости)
+        $hwPreset = if ([string]::IsNullOrWhiteSpace($script:speedPreset) -or $script:speedPreset -eq "auto") { "p4" } else { $script:speedPreset }
+        $vArgs = "-c:v $enc -cq $Quality -preset $hwPreset"
     }
     return $vArgs
 }
@@ -471,17 +576,18 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
     $files = Build-FileList
     Write-Host "  $('Files for compression'): $($files.Count)" -ForegroundColor White
     foreach ($fd in $files) { Write-Host "    - $($fd.Name)" -ForegroundColor Gray }
-    Write-Host "  $('HW'): $script:hwDevice | $('Codec'): $script:codec | $('CRF'): $script:crfValue" -ForegroundColor White
+    Write-Host "  $('HW'): $script:hwDevice | $('Codec'): $script:codec | $('CRF'): $script:crfValue | $('Speed preset'): $script:speedPreset" -ForegroundColor White
     Write-Host "  $('VMAF'): $(if($script:enableVMAF){'ON'}else{'OFF'}) | $('AutoCRF'): $(if($script:enableAutoCRF){'ON'}else{'OFF'}) | $('Presets'): $($script:presets.Count)" -ForegroundColor White
     $sizeTxt = if ($script:targetSizeMB -gt 0) { "<= $script:targetSizeMB MB" } else { "OFF" }
     Write-Host "  $('Max file size'): $sizeTxt" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  [1] $('Add Files (drag & drop into this window)')" -ForegroundColor White
+    Write-Host "  [1] $('Add Files')" -ForegroundColor White
     Write-Host "  [2] $('Hardware & Codec')" -ForegroundColor White
-    Write-Host "  [3] $('Quality & VMAF')" -ForegroundColor White
+    Write-Host "  [3] $('Quality & Speed')" -ForegroundColor White
     Write-Host "  [4] $('Max File Size') ($sizeTxt)" -ForegroundColor White
-    Write-Host "  [5] $('Presets Management')" -ForegroundColor White
-    Write-Host "  [6] $('Clear File List')" -ForegroundColor White
+    Write-Host "  [5] $('VMAF Quality Check') ($(if($script:enableVMAF){'ON'}else{'OFF'}))" -ForegroundColor White
+    Write-Host "  [6] $('Presets Management')" -ForegroundColor White
+    Write-Host "  [7] $('Clear File List')" -ForegroundColor White
     Write-Host "  --------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  [0] $('START COMPRESSION')" -ForegroundColor Green
     Write-Host "  [9] $('Back to Hub')" -ForegroundColor Red
@@ -517,17 +623,11 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
             $script:codec = switch($cC) { '1'{'h264'} '2'{'h265'} '3'{'av1'} default{'h264'} }
         }
         '3' {
-            Show-Banner "QUALITY & VMAF"
+            # Качество и скорость: CRF + пресет скорости (-preset)
+            Show-Banner "QUALITY & SPEED"
             $v = Read-Host "  CRF (0-51) [$script:crfValue]"
             if ($v -match '^\d+$') { $script:crfValue = [int]$v }
-            $script:enableVMAF = (Read-Host "  Enable VMAF? (Y/N)") -match '^[Yy]'
-            if ($script:enableVMAF) {
-                $script:enableAutoCRF = (Read-Host "  Enable AutoCRF? (Y/N)") -match '^[Yy]'
-                if ($script:enableAutoCRF) {
-                    $t = Read-Host "  VMAF Threshold (0-100) [$script:vmafThreshold]"
-                    if ($t -match '^\d+$') { $script:vmafThreshold = [int]$t }
-                }
-            }
+            Show-SpeedPresetMenu
         }
         '4' {
             # Отдельное меню ограничения максимального размера файла
@@ -545,8 +645,9 @@ if ($initialDrop.Count -gt 0) { Add-FilesToQueue -Paths $initialDrop | Out-Null 
             Write-Host "  $('Max file size'): $newTxt" -ForegroundColor Green
             Start-Sleep 1
         }
-        '5' { Show-PresetsMenu }
-        '6' { $script:selectedFiles.Clear() }
+        '5' { Show-VMAFMenu }
+        '6' { Show-PresetsMenu }
+        '7' { $script:selectedFiles.Clear() }
         '0' {
             if ($files.Count -eq 0) { Write-Host "`n  [X] $('No files found')" -ForegroundColor Red; Start-Sleep 2; continue }
             # Папка результата создаётся в главной директории скрипта (например: $ScriptDir\compressed)
