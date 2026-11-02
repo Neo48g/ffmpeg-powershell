@@ -52,6 +52,63 @@ function Load-Presets {
 }
 function Save-Presets { $script:presets | ConvertTo-Json -Depth 5 | Out-File -FilePath $PresetsFile -Encoding UTF8 -Force }
 
+# --- Безопасное чтение значений из пресета ---
+# Пресеты могут быть сохранены в разных версиях скрипта или отредактированы вручную,
+# поэтому свойства в JSON могут отсутствовать либо иметь другой тип (string/number/bool).
+# Эти функции возвращают значение по умолчанию вместо тихого сброса настроек в $null.
+function Test-PresetKey {
+    param($Preset, [string]$Key)
+    if ($null -eq $Preset) { return $false }
+    if ($Preset -is [System.Collections.IDictionary]) { return $Preset.Contains($Key) -and ($null -ne $Preset[$Key]) }
+    return ($null -ne $Preset.PSObject.Properties[$Key]) -and ($null -ne $Preset.$Key)
+}
+
+function Get-PresetValue {
+    param($Preset, [string]$Key, [string]$Default)
+    if (-not (Test-PresetKey -Preset $Preset -Key $Key)) { return $Default }
+    $v = if ($Preset -is [System.Collections.IDictionary]) { $Preset[$Key] } else { $Preset.$Key }
+    $s = "$v"
+    if ([string]::IsNullOrWhiteSpace($s)) { return $Default }
+    return $s
+}
+
+function Get-PresetInt {
+    param($Preset, [string]$Key, [int]$Default, [int]$Min, [int]$Max)
+    if (-not (Test-PresetKey -Preset $Preset -Key $Key)) { return $Default }
+    $v = if ($Preset -is [System.Collections.IDictionary]) { $Preset[$Key] } else { $Preset.$Key }
+    $n = 0
+    if ([int]::TryParse("$v", [ref]$n)) {
+        if ($n -lt $Min -or $n -gt $Max) { return $Default }
+        return $n
+    }
+    return $Default
+}
+
+function Get-PresetDouble {
+    param($Preset, [string]$Key, [double]$Default, [double]$Min)
+    if (-not (Test-PresetKey -Preset $Preset -Key $Key)) { return $Default }
+    $v = if ($Preset -is [System.Collections.IDictionary]) { $Preset[$Key] } else { $Preset.$Key }
+    $d = 0.0
+    if ([double]::TryParse(("$v" -replace ',', '.'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d)) {
+        if ($d -lt $Min) { return $Default }
+        return $d
+    }
+    return $Default
+}
+
+function Get-PresetBool {
+    param($Preset, [string]$Key, [bool]$Default)
+    if (-not (Test-PresetKey -Preset $Preset -Key $Key)) { return $Default }
+    $v = if ($Preset -is [System.Collections.IDictionary]) { $Preset[$Key] } else { $Preset.$Key }
+    if ($v -is [bool]) { return $v }
+    $b = $false
+    if ([bool]::TryParse("$v", [ref]$b)) { return $b }
+    # Числовые значения в JSON: 0 = false, иначе true
+    $n = 0
+    if ([int]::TryParse("$v", [ref]$n)) { return ($n -ne 0) }
+    return $Default
+}
+
 function Show-PresetsMenu {
     do {
         Show-Banner "PRESETS MANAGEMENT"
@@ -78,17 +135,29 @@ function Show-PresetsMenu {
             }
             '2' {
                 if ($script:presets.Count -eq 0) { Write-Host "`n  [X] $('No presets saved')" -ForegroundColor Red; Start-Sleep 1; continue }
-                $keys = $script:presets.Keys | Sort-Object; $i = 1
+                $keys = @($script:presets.Keys | Sort-Object); $i = 1
                 foreach ($k in $keys) { Write-Host "  [$i] $k ($($script:presets[$k].HwDevice) | $($script:presets[$k].Codec) | CRF:$($script:presets[$k].CRF) | $($script:presets[$k].SpeedPreset) | $(if ($script:presets[$k].TargetSizeMB -gt 0) { "<=$($script:presets[$k].TargetSizeMB) MB" } else { 'MaxSize:OFF' }))" -ForegroundColor White; $i++ }
                 $idx = Read-Host "  Select number"
                 if ($idx -match '^\d+$' -and [int]$idx -ge 1 -and [int]$idx -le $keys.Count) {
                     $p = $script:presets[$keys[[int]$idx - 1]]
-                    $script:hwDevice=$p.HwDevice; $script:codec=$p.Codec; $script:crfValue=[int]$p.CRF
-                    $script:speedPreset = if ($p.SpeedPreset) { "$($p.SpeedPreset)" } else { "auto" }
-                    $script:enableVMAF=[bool]$p.EnableVMAF; $script:enableAutoCRF=[bool]$p.EnableAutoCRF
-                    $script:vmafThreshold=[int]$p.VMAFThreshold; $script:maxIterations=[int]$p.MaxIterations; $script:minCRF=[int]$p.MinCRF
-                    if ($null -ne $p.TargetSizeMB) { $script:targetSizeMB = [double]$p.TargetSizeMB } else { $script:targetSizeMB = 0 }
+                    # Значения читаются через безопасные функции: после ConvertFrom-Json свойства могут
+                    # отсутствовать или иметь другой тип — прямое присваивание молча сбрасывало настройки.
+                    $script:hwDevice = Get-PresetValue -Preset $p -Key 'HwDevice' -Default 'CPU'
+                    $script:codec    = Get-PresetValue -Preset $p -Key 'Codec' -Default 'h264'
+                    $script:crfValue = Get-PresetInt -Preset $p -Key 'CRF' -Default 23 -Min 0 -Max 51
+                    $script:speedPreset = Get-PresetValue -Preset $p -Key 'SpeedPreset' -Default 'auto'
+                    if ([string]::IsNullOrWhiteSpace($script:speedPreset)) { $script:speedPreset = 'auto' }
+                    $script:enableVMAF    = Get-PresetBool -Preset $p -Key 'EnableVMAF' -Default $false
+                    $script:enableAutoCRF = Get-PresetBool -Preset $p -Key 'EnableAutoCRF' -Default $false
+                    # VMAF без включённой проверки качества не используется (как в Show-VMAFMenu)
+                    if (-not $script:enableVMAF) { $script:enableAutoCRF = $false }
+                    $script:vmafThreshold = Get-PresetInt -Preset $p -Key 'VMAFThreshold' -Default 90 -Min 0 -Max 100
+                    $script:maxIterations = Get-PresetInt -Preset $p -Key 'MaxIterations' -Default 3 -Min 1 -Max 10
+                    $script:minCRF        = Get-PresetInt -Preset $p -Key 'MinCRF' -Default 18 -Min 0 -Max 51
+                    $script:targetSizeMB  = Get-PresetDouble -Preset $p -Key 'TargetSizeMB' -Default 0 -Min 0
                     Write-Host "`n  [OK] $('Preset loaded')" -ForegroundColor Green
+                    Write-Host "  $('Settings'): HW=$($script:hwDevice) | $('Codec')=$($script:codec) | CRF=$($script:crfValue) | $('Speed preset')=$($script:speedPreset)" -ForegroundColor Gray
+                    Write-Host "  $('VMAF')=$(if($script:enableVMAF){'ON'}else{'OFF'}) | $('AutoCRF')=$(if($script:enableAutoCRF){'ON'}else{'OFF'}) | $('Max file size')=$(if ($script:targetSizeMB -gt 0) { "<=$($script:targetSizeMB) MB" } else { 'OFF' })" -ForegroundColor Gray
                     Start-Sleep 1
                 }
             }
